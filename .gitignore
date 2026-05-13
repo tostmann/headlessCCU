@@ -1,0 +1,30 @@
+# Runtime-State — wird vom Container ins ./data-Volume geschrieben.
+# Enthält paired-device-Listen (rfd/*.dev, crRFD/data/*.{ap,apkx,bbkx,dev}),
+# regadom, eshlight-Cache.  Nicht ins Repo, jeder Container kriegt seinen
+# eigenen Stand.
+data/
+
+# Vom prepare.sh aus ../bmcond/src/ gestaged. NICHT committen — das ist
+# der eigene tostmann/bmcond Repo (Submodule im Outer-Repo).
+src/
+
+# Build-Artefakte
+*.deb
+build/
+.cache/
+*.pyc
+__pycache__/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Dev-only (nie public)
+CLAUDE.md
+claude/
+*.strace
+*.log
+*.tar.gz
+*.pcap

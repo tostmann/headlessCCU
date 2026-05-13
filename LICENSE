@@ -1,0 +1,49 @@
+headlessCCU — GPL-2.0-or-later
+==================================
+
+Copyright © 2026 Dirk Tostmann <tostmann@gmail.com> and contributors.
+
+This program is free software; you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the
+Free Software Foundation; either version 2 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+General Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with this program; if not, see <https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt>.
+
+  SPDX-License-Identifier: GPL-2.0-or-later
+
+──────────────────────────────────────────────────────────────────────────
+What this covers
+──────────────────────────────────────────────────────────────────────────
+
+The Home Assistant Add-On wrapper for the BusMatic stack:
+- Dockerfile, run.sh, prepare.sh, build.sh, build.yaml, config.yaml
+- rootfs/ (slim lighttpd reverse-proxy config)
+- rega_session_mock.py (JSON-RPC stub for aiohomematic)
+- DOCS.md, README.md
+
+──────────────────────────────────────────────────────────────────────────
+Third-party material fetched at build time (not part of this repository)
+──────────────────────────────────────────────────────────────────────────
+
+The Docker image produced by `build.sh` `apt install`s the `debmatic`
+package from <https://apt.debmatic.de/debmatic stable main>.  That package
+ships eQ-3 closed-source components (rfd, HMServer.jar, /firmware,
+/opt/HmIP, etc.) which are NOT licensed under GPL-2.  Their distribution
+is governed by alex-mathieu's debmatic packaging (GPL-2 wrapper) and
+eQ-3's own redistribution terms applied via debmatic.
+
+Consequence: source distribution of THIS repository is unrestricted
+under GPL-2-or-later.  Distribution of the BUILT Docker image is NOT
+permitted as a binary redistribution channel for the eQ-3 components.
+End users build the image themselves from upstream debmatic.
+
+bmcond (busmatic-concentrator), staged into the build context by
+`prepare.sh`, has its own LICENSE and CREDITS — see the bmcond
+sister-directory or its standalone repository.

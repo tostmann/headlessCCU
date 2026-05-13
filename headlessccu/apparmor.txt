@@ -1,0 +1,51 @@
+#include <tunables/global>
+
+profile headlessccu flags=(attach_disconnected,mediate_deleted,complain) {
+  #include <abstractions/base>
+
+  # Capabilities
+  capability,
+  file,
+  mount,
+  umount,
+  remount,
+  network,
+
+  capability chown,
+  capability setgid,
+  capability setuid,
+  capability dac_override,
+  capability net_bind_service,
+  capability sys_admin,
+  capability sys_rawio,
+  capability sys_resource,
+
+  # S6-Overlay / init paths (auch wenn wir kein S6 nutzen — schadet nicht)
+  /bin/** ix,
+  /usr/bin/** ix,
+  /usr/lib/bashio/** ix,
+  /etc/s6/** rix,
+  /run/s6/** rix,
+  /etc/services.d/** rwix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
+  /init rix,
+  /var/run/** mrwkl,
+  /var/run/ mrwkl,
+  /proc/self/attr/** mrwkl,
+
+  # /dev write — bmcond muss /dev/mmd_bidcos und /dev/mmd_hmip als Symlinks
+  # anlegen (Pattern aus dem RaspberryMatic/OpenCCU-Add-On übernommen).
+  /dev/* mrwkl,
+  /tmp/** mrkwl,
+
+  # Data access (Add-On /data Volume)
+  /data/** rw,
+
+  # USB-libusb-Zugriff
+  /dev/bus/usb/** rw,
+
+  # ptrace + signal: docker daemon kompatibel
+  ptrace (trace,read) peer=docker-default,
+  signal (receive) set=(kill,term) peer=/usr/bin/docker,
+}

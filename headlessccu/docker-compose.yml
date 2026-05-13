@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# BusMatic-HASS — plain-Docker Compose-File (für a-host-Style Hosts ohne HA-Supervisor).
+#
+# Bringup:
+#   git clone https://github.com/tostmann/headlessCCU
+#   cd headlessCCU/headlessccu
+#   ./build.sh                # baut Image (clont bmcond@tag intern)
+#   docker compose up -d
+#
+# In HA (homematicip_local) als Host '127.0.0.1' konfigurieren — keine
+# Custom-Ports nötig (seit v0.2.29 mappt lighttpd :80 → :8765 für die
+# JSON-RPC-Default-Annahme von aiohomematic, und rega_session_mock liefert
+# Interface.isPresent für Auto-Detection beider RF-Interfaces).
+# Username/Password werden vom Mock nicht validiert — beliebige Werte.
+#
+# Belegte Ports am Host (network_mode: host):
+#   :80    lighttpd-proxy  → 127.0.0.1:8765/api/homematic.cgi (rega_session_mock)
+#   :8765  rega_session_mock direct (kein Routing nötig wenn :80 frei bleibt)
+#   :2001  lighttpd-proxy  → 127.0.0.1:32001 (rfd BidCoS XML-RPC)
+#   :2010  lighttpd-proxy  → 127.0.0.1:32010 (HMServer HmIP XML-RPC)
+#   :9126  bmcond JSON-API / Ingress-WebUI
+#
+# ⚠ Wenn Host bereits :80 belegt: lighttpd-Block in
+# rootfs/etc/lighttpd/lighttpd.conf entfernen + im HA-Setup
+# `custom_port_config=true, json_port=8765` setzen.
+
+services:
+  headlessccu:
+    image: headlessccu:dev
+    build:
+      # Build-Kontext = dieses Verzeichnis (HA-Supervisor-Konvention).
+      # bmcond-Source wird vom Dockerfile selbst via git clone gezogen —
+      # kein lokales Staging nötig.
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_FROM: debian:bookworm-slim
+        BMCOND_VERSION: ${BMCOND_VERSION:-2026.5.3}
+        # Pin der eq-3-Bundle-Version aus apt.debmatic.de.  Beim Bump:
+        # hier eintragen (Default = 3.85.7-123, /boot/VERSION=3.85.7.123).
+        # Siehe Dockerfile-Kommentar zum ARG.  Overrides:
+        #   DEBMATIC_VERSION=3.85.8-124 docker compose build   # neuer Pin
+        #   DEBMATIC_VERSION=latest      docker compose build  # unpinned-Fallback
+        DEBMATIC_VERSION: ${DEBMATIC_VERSION:-3.85.7-123}
+    container_name: headlessccu
+    restart: unless-stopped
+    # network_mode: host ist nötig damit rfd's XML-RPC-Event-Callbacks den
+    # HA-Container (selbst im network=host) auf 127.0.0.1:<callback-port>
+    # erreichen.  Mit default-bridge wäre das Container-eigenes lo, das
+    # nichts erreicht — Symptom: setValue funktional, aber HA bekommt keine
+    # State-Bestätigung und macht OPTIMISTIC_ROLLBACK nach 30s.
+    network_mode: host
+    volumes:
+      - ./data:/data            # persistente /etc/config (rfd-Keys, Pairings)
+      # avahi-daemon-Socket vom Host durchreichen, damit `avahi-browse` (in
+      # /api/discover, Stage 47b.2) die Host-mDNS-DB benutzt — sonst müsste
+      # der Container seinen eigenen avahi-daemon laufen lassen, der sich
+      # mit dem Host-Daemon ums network_mode=host gegenseitig stört.
+      - /var/run/avahi-daemon:/var/run/avahi-daemon:ro
+      - /var/run/dbus:/var/run/dbus:ro
+    devices:
+      # libusb-direct: /dev/bus/usb durchreichen — Docker setzt automatisch
+      # die device-cgroup-Rule für character-major 189 (usbfs).  Ein reiner
+      # `-v /dev/bus/usb:/dev/bus/usb` Bind-Mount schafft die dev-Nodes
+      # zwar im Container-Namespace, aber der device-cgroup blockt open()
+      # mit EPERM. `devices:` umgeht das.
+      - /dev/bus/usb:/dev/bus/usb
+      # Nur nötig für multimacd_shim=true:  /dev/eq3loop ist das char-
+      # device des eq3_char_loop-Kernel-Moduls (piVCCU-modules-dkms, GPLv2).
+      # Auf dem Host muss das Modul geladen sein (`modprobe eq3_char_loop`,
+      # bei piVCCU-Installation default).  Im Container braucht's diese
+      # explizite Permission damit multimacd das Device öffnen kann.
+      # Hat der Host das Modul NICHT, ist shim-Mode unbrauchbar.
+      # - /dev/eq3loop:/dev/eq3loop
+    cap_add:
+      - SYS_RAWIO              # libusb_detach_kernel_driver braucht ggf. CAP_SYS_RAWIO
+      # - MKNOD                # nur multimacd_shim=true: mknod /dev/mmd_*
+      # - SYS_MODULE           # nur multimacd_shim=true: modprobe (wenn Host
+      #                          eq3_char_loop NICHT vor-geladen hat)
+    environment:
+      # HMID "auto" (Default): run.sh würfelt beim Erststart eine 3-byte-HMID
+      # und persistiert sie in ./data/etc-config/ids.  Bei Bedarf hier durch
+      # 6-hex-String ersetzen oder via shell-env via `${BUSMATIC_HMID:-auto}`
+      # parametrierbar machen — überschreibt das auto-Verhalten.
+      BUSMATIC_HMID: "${BUSMATIC_HMID:-auto}"
+      BUSMATIC_SERIAL: "${BUSMATIC_SERIAL:-BMC0000001}"
+      BUSMATIC_FW: "${BUSMATIC_FW:-2.8.6}"
+      BUSMATIC_BIDCOS_TRANSPORT: "usb=1b1f:c020"
+      BUSMATIC_HMIP_TRANSPORT: "usb=1b1f:c020"
+      BUSMATIC_LOGLEVEL: "3"
+      REGA_MOCK_LOG_LEVEL: "INFO"
+      # multimacd_shim=true → eq-3-multimacd übernimmt den vollen Mac-Layer
+      # (DUTY/CSMA/AES/3burst-Retry).  Voraussetzung: cap_add MKNOD +
+      # device /dev/eq3loop (siehe Kommentare oben).
+      BUSMATIC_MULTIMACD_SHIM: "${BUSMATIC_MULTIMACD_SHIM:-false}"

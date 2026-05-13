@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# HA-Supervisor multi-arch Build-Manifest.
+#
+# Wir nehmen Vanilla-debian:bookworm-slim statt HA's base-debian:
+#   - Letzteres bündelt bashio + s6-overlay; brauchen wir nicht (run.sh
+#     ist PID-1 ohne Init-System).
+#   - debian:bookworm-slim ist offiziell für alle drei Archs.
+#   - debmatic apt-Repo (Quelle der eq-3-Binaries) hat alle drei Archs:
+#     arm64, armhf, amd64.
+
+build_from:
+  aarch64: docker.io/library/debian:bookworm-slim
+  armv7:   docker.io/library/debian:bookworm-slim
+  amd64:   docker.io/library/debian:bookworm-slim
+
+# Squash multi-stage layers im Image-Endprodukt
+squash: false

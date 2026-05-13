@@ -1,0 +1,129 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# headlessCCU — Home Assistant Add-On (auch als plain-Docker-Container nutzbar)
+#
+# Bündelt den BusMatic-RF-Stack (bmcond + rfd + HMIPServer + rega_session_mock)
+# in einem Container.  Home Assistant spricht via homematicip_local
+# (custom_homematic) direkt rein — keine CCU-WebUI, kein ReGaHss.
+#
+# Funktioniert genauso als reines Docker-Compose-Setup ohne HA-Supervisor.
+#
+# Ports:
+#   8765/tcp  → rega_session_mock  (Auth-/Session-Stub für aiohomematic)
+#   2001/tcp  → lighttpd → rfd     (BidCoS XML-RPC)
+#   2010/tcp  → lighttpd → HMServer.jar (HmIP XML-RPC)
+#
+# USB-Hardware:
+#   HmIP-RFUSB (1b1f:c020) wird via libusb-direct angesprochen. Der Stick
+#   muss NICHT vom cp210x-Kerneltreiber gegrabbed werden; bmcond detacht
+#   ggf. selbst und claimt das Interface. Der Add-On bekommt USB-Zugriff
+#   via `usb: true` (Supervisor mountet /dev/bus/usb dynamisch).
+
+name: headlessCCU (bmcond + multimacd + rfd + HMIPServer + JSON-RPC mock)
+version: 2026.5.18
+slug: headlessccu
+description: HomeMatic CCU ohne WebUI/ReGaHss — direkt für Home Assistant oder als Standalone-Docker.
+url: https://github.com/tostmann/headlessCCU
+arch:
+  - aarch64
+  - amd64
+  - armv7
+
+# 'system' = startet vor anderen Add-Ons, damit homematicip_local sich verbinden kann
+startup: system
+boot: auto
+
+# Add-On terminiert beim Stop sauber via SIGTERM — run.sh hat trap.
+host_pid: false
+
+# host_network=true ist erforderlich:
+# rfd's Event-Callback an aiohomematic ruft die URL die HA registriert hat
+# (default 127.0.0.1:<random-port>).  Bridge-Network würde Container-eigenes
+# lo addressieren statt Host-lo → setValue funktional, aber HA bekommt keine
+# State-Bestätigung und macht nach 30s OPTIMISTIC_ROLLBACK.
+# Ports werden direkt im Host-Namespace geöffnet (8765/2001/2010/9126).
+host_network: true
+
+# USB-Hardware durchreichen.  Mit libusb-direct in bmcond brauchen wir
+# Zugriff auf /dev/bus/usb komplett — HA-Supervisor liefert das wenn
+# `usb: true` gesetzt ist (claimt Interface 0 des HmIP-RFUSB selbst,
+# detacht ggf. cp210x).
+usb: true
+
+# Symlinks für rfd/HMIPServer landen in /tmp (writable im Container) statt
+# /dev (read-only im HAOS-Supervisor-Container).  bmcond legt
+# /tmp/mmd_bidcos → /dev/pts/N als Symlink an, confgen schreibt
+# ComPortFile=/tmp/mmd_bidcos in rfd.conf.  Damit umgehen wir die /dev-RO-
+# Beschränkung des Supervisors ohne SYS_ADMIN/apparmor/udev-Eskalation.
+
+# Persistente State-Volumes:
+#   /data         — Add-On-default, hier landet pairing/state (rfd-keys etc.)
+#   /share        — optional für externes Backup
+# Wird im run.sh nach /etc/config gemappt.
+map:
+  - share:rw
+
+options:
+  # hmid: "auto" (Default) → run.sh generiert beim Erststart eine zufällige
+  # 3-byte HMID aus /dev/urandom und persistiert sie in /data/etc-config/ids;
+  # nachfolgende Starts lesen sie aus ids zurück.  Falls Hardware oder
+  # Pairing-State eine bestimmte HMID erfordert: hier 6-hex-String setzen
+  # (z.B. "32f1df") — überschreibt das auto-Verhalten.
+  hmid: "auto"
+  serial: "BMC0000001"
+  firmware: "2.8.6"
+  # Transport-Strings:
+  #   usb=VID:PID         libusb-direct (eq-3 HmIP-RFUSB, HB-RF-USB v1/v2)
+  #   rfusb=/dev/ttyXXX   UART via Kernel-Treiber (cp210x, ftdi_sio)
+  #   host:port           TCP-Backend (CULFW32, HM-LGW2)
+  # hmip_radio leer / "" / "none" = HmIP-Pfad disabled (BidCoS-only-Setup):
+  #   kein /dev/mmd_hmip, kein HMIPServer.jar, kein HmIP-Slot in
+  #   InterfacesList.xml.  Nützlich für reine HM-Classic-Aufstellungen
+  #   (z.B. CULFW32 als BidCoS-Gateway).
+  bidcos_radio: "usb=1b1f:c020"
+  hmip_radio: "usb=1b1f:c020"
+  loglevel: 3
+  log_level_mock: "INFO"
+schema:
+  # "auto" oder genau 6-hex.  Default-Option ist auto.
+  hmid: "match(^(auto|[0-9a-fA-F]{6})$)"
+  serial: "match(^[A-Z0-9]{10}$)"
+  firmware: "match(^[0-9]+\\.[0-9]+\\.[0-9]+$)"
+  bidcos_radio: "str?"
+  hmip_radio: "str?"
+  loglevel: "int(0,5)"
+  log_level_mock: "list(DEBUG|INFO|WARNING|ERROR)"
+
+# Ressourcenrahmen — Java-HMServer + rfd + bmcond + lighttpd + Python-Mock.
+# 256M RAM ist knapp aber reicht im Live-Test auf a-host (Pi5).
+# Der Mock ist auf 64M MemoryMax in der Standalone-Service-Variante.
+hassio_role: default
+# hassio_api: true → SUPERVISOR_TOKEN env-var wird gesetzt; run.sh kann
+# damit nach /api/reload-trigger sauber `POST /addons/self/restart` rufen
+# → Supervisor stoppt+startet den Container fresh statt fragiler in-
+# Container re-exec (das hatte port-binding-Probleme).
+hassio_api: true
+# homeassistant_api: true → SUPERVISOR_TOKEN kann auch HA-Core-API via
+# `http://supervisor/core/api/*` ansprechen.  Wird von rega_session_mock
+# genutzt, um nach Pair-Window aiohomematic's clear_cache +
+# reload_config_entry automatisch zu triggern (workaround für den
+# aiohomematic_pair_cache_bug — sonst landen neue Devices nicht im
+# Entity-Registry).
+homeassistant_api: true
+auth_api: false
+
+# Ingress: bmcond JSON-API + WebUI im HA-Sidebar einbinden.
+# Supervisor reverse-proxyt /api/hassio_ingress/<token>/* auf <container>:9126.
+# Da host_network=true ist, hört bmcond direkt auf Host-Port 9126 — Supervisor
+# spricht den Container über die Add-On-Bridge an, was bei host_network nicht
+# verfügbar ist.  Lösung: ingress nutzt das addon-internal-Netz; bmcond bindet
+# zusätzlich auf 0.0.0.0:9126 (was es bereits tut), HA-Supervisor löst die
+# Ingress-IP vom Add-On auf den Host auf.
+# Bei host_network=true muss ingress_port zur Host-Port-Belegung passen — der
+# Supervisor kennt den Add-On-IP-Pfad nicht und nutzt die addon-name-Auflösung
+# über das HA-Netz.
+ingress: true
+ingress_port: 9126
+ingress_stream: false
+panel_icon: mdi:radio-tower
+panel_title: headlessCCU
+panel_admin: true
