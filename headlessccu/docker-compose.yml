@@ -33,9 +33,14 @@ services:
       # kein lokales Staging nötig.
       context: .
       dockerfile: Dockerfile
+      # BuildKit's isolierter Netzwerk-Namespace bekommt apt.debmatic.de /
+      # github.com manchmal nicht zuverlässig durch (TCP-resets mid-stream,
+      # SSL-timeouts).  `network: host` lässt den Builder das Host-Netz nutzen
+      # — DNS + Routing + ggf. HTTP(S)_PROXY-Vars wirken dann direkt.
+      network: host
       args:
         BUILD_FROM: debian:bookworm-slim
-        BMCOND_VERSION: ${BMCOND_VERSION:-2026.5.3}
+        BMCOND_VERSION: ${BMCOND_VERSION:-2026.5.7}
         # Pin der eq-3-Bundle-Version aus apt.debmatic.de.  Beim Bump:
         # hier eintragen (Default = 3.85.7-123, /boot/VERSION=3.85.7.123).
         # Siehe Dockerfile-Kommentar zum ARG.  Overrides:
