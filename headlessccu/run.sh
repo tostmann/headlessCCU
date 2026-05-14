@@ -214,7 +214,8 @@ echo "── Starting busmatic-concentrator (transport-shim für multimacd) ─�
 CONC_ARGS=(
   "$TRANSPORT_FLAG" "$TRANSPORT_VAL"
   --raw-uart "/tmp/raw-uart-shim"
-  -v
+  -C
+  -V
 )
 echo "  args: ${CONC_ARGS[*]}"
 /usr/local/bin/busmatic-concentrator "${CONC_ARGS[@]}" 2>&1 \
