@@ -26,7 +26,7 @@
 
 services:
   headlessccu:
-    image: headlessccu:dev
+    image: headlessccu:2026.5.19
     build:
       # Build-Kontext = dieses Verzeichnis (HA-Supervisor-Konvention).
       # bmcond-Source wird vom Dockerfile selbst via git clone gezogen —
@@ -65,18 +65,26 @@ services:
       # zwar im Container-Namespace, aber der device-cgroup blockt open()
       # mit EPERM. `devices:` umgeht das.
       - /dev/bus/usb:/dev/bus/usb
-      # Nur nötig für multimacd_shim=true:  /dev/eq3loop ist das char-
-      # device des eq3_char_loop-Kernel-Moduls (piVCCU-modules-dkms, GPLv2).
-      # Auf dem Host muss das Modul geladen sein (`modprobe eq3_char_loop`,
-      # bei piVCCU-Installation default).  Im Container braucht's diese
-      # explizite Permission damit multimacd das Device öffnen kann.
-      # Hat der Host das Modul NICHT, ist shim-Mode unbrauchbar.
-      # - /dev/eq3loop:/dev/eq3loop
+      # /dev/eq3loop ist das char-device des eq3_char_loop-Kernel-Moduls
+      # (piVCCU-modules-dkms, GPLv2).  Auf dem Host muss das Modul geladen
+      # sein (`modprobe eq3_char_loop`, bei piVCCU-Installation default).
+      # multimacd (lean-shim-Pfad seit bmcond 2026.5.7) öffnet das als
+      # Master und erzeugt /dev/mmd_bidcos + /dev/mmd_hmip.
+      - /dev/eq3loop:/dev/eq3loop
+    # device-cgroup-rule: char-major 509 alle minors freischalten.
+    # `devices:` whitelisted nur 509:0 (eq3loop selbst).  multimacd erzeugt
+    # /dev/mmd_bidcos (509:2) und /dev/mmd_hmip (509:1) zur Laufzeit per
+    # mknod (CAP_MKNOD).  Ohne diese Regel blockt die device-cgroup das
+    # open() — sichtbar als EPERM in strace von rfd/HMServer trotz mode 644.
+    # Symptom-Kette: "Identify response string not handled: " (leer) → rfd
+    # crash → container-loop.
+    device_cgroup_rules:
+      - 'c 509:* rwm'
     cap_add:
       - SYS_RAWIO              # libusb_detach_kernel_driver braucht ggf. CAP_SYS_RAWIO
-      # - MKNOD                # nur multimacd_shim=true: mknod /dev/mmd_*
-      # - SYS_MODULE           # nur multimacd_shim=true: modprobe (wenn Host
-      #                          eq3_char_loop NICHT vor-geladen hat)
+      - MKNOD                  # multimacd: mknod /dev/mmd_bidcos + /dev/mmd_hmip
+      - SYS_MODULE             # run.sh: modprobe eq3_char_loop falls Host noch nicht geladen
+      - SYS_NICE               # multimacd: sched_setpriority für FastMacResponder-thread
     environment:
       # HMID "auto" (Default): run.sh würfelt beim Erststart eine 3-byte-HMID
       # und persistiert sie in ./data/etc-config/ids.  Bei Bedarf hier durch

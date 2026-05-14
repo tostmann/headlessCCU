@@ -291,10 +291,11 @@ fi
 # start_multimacd.sh-Wrapper) damit es im FOREGROUND läuft.  Sonst
 # daemonized es sich, der Wrapper exitet rc=0 und run.sh's wait -n
 # interpretiert das als crash → Shutdown-Trigger.
-sed "s|^Coprocessor Device Path = .*$|Coprocessor Device Path = /tmp/raw-uart-shim|" \
+sed -e "s|^Coprocessor Device Path = .*$|Coprocessor Device Path = /tmp/raw-uart-shim|" \
+    -e "s|^Log Destination = .*$|Log Destination = Stderr|" \
     /etc/multimacd.conf > /var/run/multimacd.conf
 echo "  multimacd config:"
-grep "Coprocessor Device" /var/run/multimacd.conf
+grep -E "Coprocessor Device|Log Destination" /var/run/multimacd.conf
 
 # multimacd kein -d → foreground.  rt-scheduling-Setup vorher.
 sysctl -w kernel.sched_rt_runtime_us=-1 >/dev/null 2>&1 || \
