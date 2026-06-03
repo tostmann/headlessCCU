@@ -380,8 +380,29 @@ if $HAS_HMIP; then
   # crRFD.conf-Template bekommt den richtigen Adapter-Port substituiert
   # (immer /tmp/mmd_hmip — bmcond demuxt das Hardware-Backend hinter der PTY).
   mkdir -p /var/run /etc/config/crRFD/data /etc/config/firmware
-  sed "s|^Adapter\.1\.Port=.*$|Adapter.1.Port=/tmp/mmd_hmip|" /etc/crRFD.conf \
-    > /var/run/crRFD.conf
+  # Lan.Routing ist für eine reine lokale USB-TRX-Installation ohne
+  # netzwerk-gekoppelte HmIP-HAPs sinnlos — und initialisiert hier nicht
+  # ("Routing was enabled in configuration but cannot be initialized").
+  # Bleibt es an, routet HMIPServer die Inclusion-RESPONSE über den (leeren)
+  # LAN-Backbone statt über den lokalen TRX → "BackboneWorker: Access point
+  # not found. Could not send frame" → Live-HmIP-Anlernen scheitert still.
+  # Aus → Inclusion-Response geht über den lokalen Adapter (mmd_hmip).
+  sed -e "s|^Adapter\.1\.Port=.*$|Adapter.1.Port=/tmp/mmd_hmip|" \
+      -e "s|^Lan\.Routing\.Enabled=.*$|Lan.Routing.Enabled=false|" \
+      /etc/crRFD.conf > /var/run/crRFD.conf
+
+  # KEYSERVER_LOCAL (Offline-/Lab-Betrieb ohne eq-3-Cloud-Keyserver) braucht
+  # einen Network.Key — sonst kann die lokale Inclusion-Key-Exchange-Antwort
+  # nicht erzeugt werden (HMIPServer: "Missing or invalid key server
+  # configuration parameter (Network.Key / Network.Key.Base) for mode:
+  # KEYSERVER_LOCAL" → Gerät sendet KEY_EXCHANGE, bekommt aber keine Antwort).
+  # 01020304...x4 ist der OCCU-/HmIP-Public-Beta-Konstant-Key für Offline-/
+  # Test-Betrieb (siehe OCCU config_templates/hmip_networkkey.conf).
+  HMIP_NETWORK_KEY="${BUSMATIC_HMIP_NETWORK_KEY:-01020304010203040102030401020304}"
+  grep -q '^Network.Key=' /var/run/crRFD.conf || \
+    echo "Network.Key=${HMIP_NETWORK_KEY}" >> /var/run/crRFD.conf
+  # zusätzlich die OCCU-kanonische Datei (manche HMServer-Pfade lesen die):
+  printf 'Network.Key=%s\n' "${HMIP_NETWORK_KEY}" > /etc/config/hmip_networkkey.conf
 
   "$JAVA_HOME/bin/java" -Xmx128m \
     -Dlog4j.configurationFile=file:///etc/config/log4j2.xml \

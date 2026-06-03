@@ -26,7 +26,7 @@
 
 services:
   headlessccu:
-    image: headlessccu:2026.5.19
+    image: headlessccu:2026.6.1
     build:
       # Build-Kontext = dieses Verzeichnis (HA-Supervisor-Konvention).
       # bmcond-Source wird vom Dockerfile selbst via git clone gezogen —
@@ -40,7 +40,7 @@ services:
       network: host
       args:
         BUILD_FROM: debian:bookworm-slim
-        BMCOND_VERSION: ${BMCOND_VERSION:-2026.5.7}
+        BMCOND_VERSION: ${BMCOND_VERSION:-2026.6.1}
         # Pin der eq-3-Bundle-Version aus apt.debmatic.de.  Beim Bump:
         # hier eintragen (Default = 3.85.7-123, /boot/VERSION=3.85.7.123).
         # Siehe Dockerfile-Kommentar zum ARG.  Overrides:
