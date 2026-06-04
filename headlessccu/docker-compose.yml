@@ -26,7 +26,7 @@
 
 services:
   headlessccu:
-    image: headlessccu:2026.6.1
+    image: headlessccu:2026.6.2
     build:
       # Build-Kontext = dieses Verzeichnis (HA-Supervisor-Konvention).
       # bmcond-Source wird vom Dockerfile selbst via git clone gezogen —
@@ -70,12 +70,18 @@ services:
       # zwar im Container-Namespace, aber der device-cgroup blockt open()
       # mit EPERM. `devices:` umgeht das.
       - /dev/bus/usb:/dev/bus/usb
-      # /dev/eq3loop ist das char-device des eq3_char_loop-Kernel-Moduls
-      # (piVCCU-modules-dkms, GPLv2).  Auf dem Host muss das Modul geladen
-      # sein (`modprobe eq3_char_loop`, bei piVCCU-Installation default).
-      # multimacd (lean-shim-Pfad seit bmcond 2026.5.7) öffnet das als
-      # Master und erzeugt /dev/mmd_bidcos + /dev/mmd_hmip.
-      - /dev/eq3loop:/dev/eq3loop
+      # /dev/eq3loop wird BEWUSST NICHT durchgereicht (weder als `devices:` noch
+      # als `-v`-Bind).  Grund: der eq3_char_loop-Node existiert nur in sysfs
+      # (kein udev/devtmpfs-Node auf dem Host).  Reicht man ihn durch und der
+      # Host-Node fehlt nach einem USB-/Modul-Event, dann
+      #   - `devices: -/dev/eq3loop`  → `--device` schlägt fehl (Container startet nicht), bzw.
+      #   - `-v /dev/eq3loop:/dev/eq3loop` → Docker legt die fehlende Quelle still
+      #     als *leeres Verzeichnis* an, das den Namen dauerhaft shadowed und
+      #     den init-mknod-Fallback aushebelt → exit 1 bei jedem Restart.
+      # run.sh mknod't /dev/eq3loop ohnehin selbst aus sysfs (CAP_MKNOD +
+      # device_cgroup_rules 'c 509:* rwm', beide unten gesetzt).  Voraussetzung:
+      # eq3_char_loop ist auf dem Host geladen (run.sh: modprobe-Fallback).
+      # Bug-Detail: BUG_eq3loop_bind_and_mmd_identify_2026-06-04.md.
     # device-cgroup-rule: char-major 509 alle minors freischalten.
     # `devices:` whitelisted nur 509:0 (eq3loop selbst).  multimacd erzeugt
     # /dev/mmd_bidcos (509:2) und /dev/mmd_hmip (509:1) zur Laufzeit per

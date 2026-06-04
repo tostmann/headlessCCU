@@ -211,10 +211,25 @@ trap shutdown_handler TERM INT
 # "Coprocessor Device" und macht den vollen Mac-Layer (DUTY/CSMA/AES/
 # LLMAC-Translation/3burst-Retry/Demux nach /dev/mmd_{bidcos,hmip}).
 echo "── Starting busmatic-concentrator (transport-shim für multimacd) ──"
+# -B (force-BL vor multimacd-Handoff) ist PFLICHT, nicht optional:
+# multimacd treibt seinen eigenen Boot-Handshake und ERWARTET das Modul im
+# Bootloader (COMMON_IDENTIFY → 'HMIP_TRX_Bl' → multimacd macht selbst
+# CHANGE_APP → 'DualCoPro_App'-Push).  Steht das Modul beim multimacd-Connect
+# schon eingeschwungen im App-Mode (was es über bmcond-Restarts/Power-Cycles
+# bleibt), liefert COMMON_IDENTIFY die *SGTIN* statt des App-Namens →
+# multimacd findet keinen App-Tag → "No Coprocessor detected / Signal 10" →
+# rfd "readSerialNumber failed / No BidCoS-Interface" → Container-Shutdown.
+# confgen (-C) läuft VOR force-BL (concentrator.c main: confgen @747, force_bl
+# @848), also bleibt der rfd.conf/InterfacesList-Output erhalten UND multimacd
+# bekommt einen sauberen Bootloader-Zustand.  Verifiziert 2026-06-04 e2e
+# (HMIP_TRX_Bl → DualCoPro_App, rfd readSerial OK, livetest HmIP 3/3, BidCoS-
+# Interface CONNECTED).  Repliziert exakt das, was der hb_rf_usb_2-Kernel-
+# Treiber via IOCRESET macht (siehe captures/multimacd_hmip_rfusb_*/ANALYSIS.md).
 CONC_ARGS=(
   "$TRANSPORT_FLAG" "$TRANSPORT_VAL"
   --raw-uart "/tmp/raw-uart-shim"
   -C
+  -B
   -V
 )
 echo "  args: ${CONC_ARGS[*]}"
@@ -276,7 +291,21 @@ modprobe -q eq3_char_loop 2>/dev/null || {
 }
 
 # /dev/eq3loop mknod-Fallback (siehe start_multimacd.sh).
-if [[ ! -e /dev/eq3loop && -e /sys/devices/virtual/eq3loop/eq3loop/dev ]]; then
+# WICHTIG: auf `! -c` (kein char-dev) testen, NICHT `! -e` (existiert).
+# Wenn der Host-Char-Node nach einem USB-/Modul-Event verschwindet und der
+# Container mit `-v /dev/eq3loop:/dev/eq3loop` läuft, legt Docker die fehlende
+# Bind-Quelle still als *leeres Verzeichnis* an → `! -e` ist FALSE → mknod
+# übersprungen → `! -c` trifft → exit 1 → Container-Shutdown bei JEDEM Restart.
+# Darum: Fremd-Placeholder (Verzeichnis/Datei, NIE ein echtes char-dev) erst
+# wegräumen, dann mknod. rmdir/rm -f fassen ein char-dev nicht an.
+# (Besser noch: /dev/eq3loop gar nicht in den Container reichen — siehe
+# docker-compose.yml; dann ist es in einem frischen Container nie vorhanden
+# und wird hier sauber selbst erzeugt.)
+if [[ -e /dev/eq3loop && ! -c /dev/eq3loop ]]; then
+  echo "── /dev/eq3loop ist kein char-dev (Docker-Bind-Autocreate?) — räume Placeholder weg ──" >&2
+  rmdir /dev/eq3loop 2>/dev/null || rm -f /dev/eq3loop 2>/dev/null || true
+fi
+if [[ ! -c /dev/eq3loop && -e /sys/devices/virtual/eq3loop/eq3loop/dev ]]; then
   mknod /dev/eq3loop c $(cat /sys/devices/virtual/eq3loop/eq3loop/dev | tr ':' ' ') || {
     echo "WARN: mknod /dev/eq3loop failed — braucht CAP_MKNOD" >&2
   }
@@ -315,7 +344,12 @@ for dev in mmd_bidcos mmd_hmip; do
   if [[ "$dev" = "mmd_hmip" ]] && ! $HAS_HMIP; then continue; fi
   for i in $(seq 1 30); do
     if [[ -e /sys/devices/virtual/eq3loop/$dev/dev ]]; then
-      if [[ ! -e /dev/$dev ]]; then
+      # Fremd-Placeholder (Docker-Bind-Autocreate o.ä.) wegräumen — NIE ein
+      # echtes char-dev. Dann auf `! -c` (statt `! -e`) testen.
+      if [[ -e /dev/$dev && ! -c /dev/$dev ]]; then
+        rmdir /dev/$dev 2>/dev/null || rm -f /dev/$dev 2>/dev/null || true
+      fi
+      if [[ ! -c /dev/$dev ]]; then
         mknod /dev/$dev c $(cat /sys/devices/virtual/eq3loop/$dev/dev | tr ':' ' ') || \
           echo "  WARN: mknod /dev/$dev failed — CAP_MKNOD?" >&2
       fi
