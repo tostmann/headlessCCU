@@ -36,9 +36,13 @@ ARG BUILD_FROM=debian:bookworm-slim
 ARG DEBMATIC_VERSION=3.85.7-123
 
 # Pin der gebündelten bmcond-Version (tostmann/bmcond git-tag).
-# 2026.5.7 ist die lean-only-shim-Variante — kein smart-tunnel mehr;
-# run.sh nutzt ausschließlich den --raw-uart-pfad gegen multimacd.
-ARG BMCOND_VERSION=2026.5.7
+# run.sh übergibt seit 2026.6.2 unconditional -B (force-BL vor multimacd-
+# Handoff) — das kennt bmcond erst ab 2026.6.1.  Dieser ARG-Default MUSS
+# synchron bleiben mit den Defaults in build.sh und docker-compose.yml:
+# der HA-Supervisor baut NUR aus diesem Dockerfile (build.yaml reicht keine
+# args durch).  Vorfall 2026-06-07: stale Pin 2026.5.7 hier → Supervisor-
+# Build stirbt an "invalid option -- 'B'", Stack kommt nie hoch.
+ARG BMCOND_VERSION=2026.6.1
 ARG BMCOND_REPO=https://github.com/tostmann/bmcond.git
 
 # ─── Stage 1: bmcond-builder ──────────────────────────────────────────────────

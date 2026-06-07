@@ -28,9 +28,11 @@ IMAGE_TAG="${IMAGE_TAG:-headlessccu:dev}"
 DEBMATIC_VERSION="${DEBMATIC_VERSION:-3.85.7-123}"
 
 # Pin der gebündelten bmcond-Version (Default = passender Tag im
-# tostmann/bmcond Repo).  Override:
+# tostmann/bmcond Repo).  MUSS synchron bleiben mit dem ARG-Default im
+# Dockerfile und docker-compose.yml — run.sh verlangt seit 2026.6.2
+# bmcond >= 2026.6.1 (-B force-BL).  Override:
 #   BMCOND_VERSION=main ./build.sh
-BMCOND_VERSION="${BMCOND_VERSION:-2026.5.3}"
+BMCOND_VERSION="${BMCOND_VERSION:-2026.6.1}"
 
 echo "── docker build ──"
 # --network=host umgeht docker0-MTU-Falle: bei Hosts mit eth0-MTU<1500

@@ -46,6 +46,28 @@ Supported sticks via libusb-direct:
 - HB-RF-USB-2 (CP2102N `10c4:8c07/8d81/8d91/8e4a`) — verified
   cross-quirk-table
 
+### Kernel module `eq3_char_loop` (required since 2026.6.x)
+
+Since the multimacd-shim architecture (2026.6.x) the stack runs eQ-3's
+`multimacd` inside the container.  multimacd needs `/dev/eq3loop`, whose
+kernel module **must be available on the host** — the container can only
+`modprobe` it (needs `CAP_SYS_MODULE`, granted in `docker-compose.yml`)
+or `mknod` the device node from sysfs if the host already loaded it.
+
+- **Debian / Raspberry Pi OS host:** the module ships in debmatic's
+  `pivccu-modules-dkms` package (DKMS-built for the running kernel).
+  Either install debmatic on the host, or build/load the module from
+  the piVCCU sources.  Verify with `modinfo eq3_char_loop`.
+- **Home Assistant OS:** the HAOS kernel does **not** ship this module
+  and add-ons cannot load external modules — the multimacd-shim path
+  therefore does **not** run on HAOS at the moment.  This is a known
+  limitation of the 2026.6.x line (the pre-2026.6 bmcond-native path
+  did not need it).
+
+Failure signature when the module is missing:
+`modprobe eq3_char_loop fehlgeschlagen` followed by
+`ERROR: /dev/eq3loop fehlt und konnte nicht erzeugt werden`.
+
 ### Legacy: cp210x-via-kernel path
 
 If you need to keep using the kernel `cp210x` driver (e.g., co-existing

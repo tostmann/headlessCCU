@@ -225,6 +225,17 @@ echo "── Starting busmatic-concentrator (transport-shim für multimacd) ─�
 # (HMIP_TRX_Bl → DualCoPro_App, rfd readSerial OK, livetest HmIP 3/3, BidCoS-
 # Interface CONNECTED).  Repliziert exakt das, was der hb_rf_usb_2-Kernel-
 # Treiber via IOCRESET macht (siehe captures/multimacd_hmip_rfusb_*/ANALYSIS.md).
+# Kompat-Guard: -B gibt's erst ab bmcond 2026.6.1.  Ein älteres Binary
+# (stale BMCOND_VERSION-Pin in Dockerfile/build.sh) stirbt sonst an
+# getopt-Usage-Noise, der Stack hängt 15s am Shim-Wait und fällt dann
+# scheinbar am eq3loop-Check — die echte Ursache ist im Log kaum zu
+# erkennen (Vorfall 2026-06-07, Supervisor-Build mit Pin 2026.5.7).
+if ! /usr/local/bin/busmatic-concentrator -h 2>&1 | grep -qE '^[[:space:]]*-B[[:space:]]'; then
+  echo "ERROR: gebündelter busmatic-concentrator kennt -B nicht — bmcond >= 2026.6.1 erforderlich." >&2
+  echo "       BMCOND_VERSION-Pin prüfen (Dockerfile ARG / build.sh / docker-compose.yml)." >&2
+  exit 1
+fi
+
 CONC_ARGS=(
   "$TRANSPORT_FLAG" "$TRANSPORT_VAL"
   --raw-uart "/tmp/raw-uart-shim"

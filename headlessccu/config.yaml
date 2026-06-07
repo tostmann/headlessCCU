@@ -19,7 +19,7 @@
 #   via `usb: true` (Supervisor mountet /dev/bus/usb dynamisch).
 
 name: headlessCCU (bmcond + multimacd + rfd + HMIPServer + JSON-RPC mock)
-version: 2026.6.2
+version: 2026.6.3
 slug: headlessccu
 description: HomeMatic CCU ohne WebUI/ReGaHss — direkt für Home Assistant oder als Standalone-Docker.
 url: https://github.com/tostmann/headlessCCU
