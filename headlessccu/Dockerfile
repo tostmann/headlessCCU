@@ -42,7 +42,7 @@ ARG DEBMATIC_VERSION=3.85.7-123
 # der HA-Supervisor baut NUR aus diesem Dockerfile (build.yaml reicht keine
 # args durch).  Vorfall 2026-06-07: stale Pin 2026.5.7 hier → Supervisor-
 # Build stirbt an "invalid option -- 'B'", Stack kommt nie hoch.
-ARG BMCOND_VERSION=2026.6.1
+ARG BMCOND_VERSION=2026.6.2
 ARG BMCOND_REPO=https://github.com/tostmann/bmcond.git
 
 # ─── Stage 1: bmcond-builder ──────────────────────────────────────────────────
