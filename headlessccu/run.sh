@@ -440,13 +440,41 @@ fi
 # selbst (Boot-Probe + CHANGE_APP); /dev/mmd_bidcos existiert nur wenn das
 # durchgegangen ist.
 
-# ── 2. rfd ──
+# ── 2. rfd (mit Identify-Race-Retry) ──
 # debmatic-apt installiert nach /bin/rfd mit libs unter /usr/share/debmatic/lib.
-echo "── Starting rfd ──"
-LD_LIBRARY_PATH=/usr/share/debmatic/lib \
-  /bin/rfd -c -l "$RFD_LOGLEVEL" \
-    -f /etc/config/rfd.conf \
-    > >(stdbuf -oL sed 's/^/[rfd    ] /') 2>&1 &
+#
+# Boot-Race: rfd's improvedInit schickt einen Identify-Probe an multimacd, BEVOR
+# multimacd seine Coprocessor-Session fertig aufgebaut hat → leere Antwort
+# ("Identify response string not handled: ") → rfd "No BidCoS-Interface" → rfd
+# exitet sauber (rc=0) → früher fuhr das den ganzen Container runter.  Auf
+# schnellen Hosts (nativ-USB) gewinnt multimacd meist; auf langsamen Pfaden
+# (USB-Passthrough in einer VM, langsame Hosts) verliert rfd zuverlässig.
+# Darum: rfd in einen Retry-Loop, der multimacd AM LEBEN lässt — stirbt rfd
+# früh, neu starten (Backoff), bis multimacds Coprocessor antwortet und rfd
+# identifiziert.  Lief rfd lange (>=60s = echter Lauf), Retry-Budget zurück-
+# setzen, damit ein späterer echter Crash nicht vom Startup-Budget aufgefressen
+# wird.  Nach RFD_MAX_TRIES schnellen Fehlversuchen aufgeben → Container-Exit
+# mit rfds echtem rc (der self-diagnostizierende Supervisor nennt 'rfd').
+rfd_supervised() {
+  local tries=0 rc start dur
+  while true; do
+    start=$(date +%s)
+    LD_LIBRARY_PATH=/usr/share/debmatic/lib \
+      /bin/rfd -c -l "$RFD_LOGLEVEL" -f /etc/config/rfd.conf
+    rc=$?
+    dur=$(( $(date +%s) - start ))
+    [[ $dur -ge 60 ]] && tries=0          # echter Lauf → Budget reset
+    tries=$((tries+1))
+    if [[ $tries -ge ${RFD_MAX_TRIES:-8} ]]; then
+      echo "[rfd] gab nach $tries schnellen Fehlversuchen auf (letzter rc=$rc, lief ${dur}s)" >&2
+      return "$rc"
+    fi
+    echo "[rfd] exited rc=$rc nach ${dur}s (Fehlversuch $tries/${RFD_MAX_TRIES:-8}) — multimacd evtl. noch nicht bereit (Identify leer?); retry in ${RFD_RETRY_DELAY:-4}s" >&2
+    sleep "${RFD_RETRY_DELAY:-4}"
+  done
+}
+echo "── Starting rfd (Identify-Race-Retry, max ${RFD_MAX_TRIES:-8}) ──"
+rfd_supervised > >(stdbuf -oL sed 's/^/[rfd    ] /') 2>&1 &
 track "rfd"
 sleep 2
 
