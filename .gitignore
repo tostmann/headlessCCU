@@ -28,3 +28,16 @@ claude/
 *.log
 *.tar.gz
 *.pcap
+
+# Secrets / NIEMALS in Git (projekt-übergreifende Forbidden-Files-Regel)
+.env
+.env.*
+*.key
+*.pem
+MEMORY.md
+GEMINI.md
+FACTS.md
+HARDWARE_STATUS.md
+schematics/
+datasheets/
+datasheet/
