@@ -19,7 +19,7 @@
 #   via `usb: true` (Supervisor mountet /dev/bus/usb dynamisch).
 
 name: headlessCCU (bmcond + multimacd + rfd + HMIPServer + JSON-RPC mock)
-version: 2026.6.4
+version: 2026.6.5
 slug: headlessccu
 description: HomeMatic CCU ohne WebUI/ReGaHss — direkt für Home Assistant oder als Standalone-Docker.
 url: https://github.com/tostmann/headlessCCU
@@ -127,7 +127,7 @@ schema:
   log_level_mock: "list(DEBUG|INFO|WARNING|ERROR)"
 
 # Ressourcenrahmen — Java-HMServer + rfd + bmcond + lighttpd + Python-Mock.
-# 256M RAM ist knapp aber reicht im Live-Test auf a-host (Pi5).
+# 256M RAM ist knapp aber reicht im Live-Test auf einem Pi5.
 # Der Mock ist auf 64M MemoryMax in der Standalone-Service-Variante.
 hassio_role: default
 # hassio_api: true → SUPERVISOR_TOKEN env-var wird gesetzt; run.sh kann

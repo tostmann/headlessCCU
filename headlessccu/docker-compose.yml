@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# BusMatic-HASS — plain-Docker Compose-File (für a-host-Style Hosts ohne HA-Supervisor).
+# BusMatic-HASS — plain-Docker Compose-File (für Hosts ohne HA-Supervisor).
 #
 # Bringup:
 #   git clone https://github.com/tostmann/headlessCCU
@@ -26,7 +26,7 @@
 
 services:
   headlessccu:
-    image: headlessccu:2026.6.2
+    image: headlessccu:2026.6.4
     build:
       # Build-Kontext = dieses Verzeichnis (HA-Supervisor-Konvention).
       # bmcond-Source wird vom Dockerfile selbst via git clone gezogen —
@@ -57,6 +57,12 @@ services:
     network_mode: host
     volumes:
       - ./data:/data            # persistente /etc/config (rfd-Keys, Pairings)
+      # Host-/lib/modules read-only → der Container findet eq3_char_loop.ko und
+      # kann es mit `modprobe` selbst laden (run.sh; kmod ist seit 2026.6.4 im
+      # Image).  Pendant zu HAOS' `kernel_modules: true`.  OHNE diesen Mount
+      # scheitert der Container-modprobe an der fehlenden .ko (Modul müsste
+      # host-seitig vorgeladen sein) — mit ihm ist der Stack self-sufficient.
+      - /lib/modules:/lib/modules:ro
       # avahi-daemon-Socket vom Host durchreichen, damit `avahi-browse` (in
       # /api/discover, Stage 47b.2) die Host-mDNS-DB benutzt — sonst müsste
       # der Container seinen eigenen avahi-daemon laufen lassen, der sich
