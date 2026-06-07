@@ -19,7 +19,7 @@
 #   via `usb: true` (Supervisor mountet /dev/bus/usb dynamisch).
 
 name: headlessCCU (bmcond + multimacd + rfd + HMIPServer + JSON-RPC mock)
-version: 2026.6.3
+version: 2026.6.4
 slug: headlessccu
 description: HomeMatic CCU ohne WebUI/ReGaHss — direkt für Home Assistant oder als Standalone-Docker.
 url: https://github.com/tostmann/headlessCCU
@@ -49,11 +49,44 @@ host_network: true
 # detacht ggf. cp210x).
 usb: true
 
-# Symlinks für rfd/HMIPServer landen in /tmp (writable im Container) statt
-# /dev (read-only im HAOS-Supervisor-Container).  bmcond legt
-# /tmp/mmd_bidcos → /dev/pts/N als Symlink an, confgen schreibt
-# ComPortFile=/tmp/mmd_bidcos in rfd.conf.  Damit umgehen wir die /dev-RO-
-# Beschränkung des Supervisors ohne SYS_ADMIN/apparmor/udev-Eskalation.
+# ── HAOS-Privilegien für den multimacd-Shim (seit 2026.6.x) ────────────────
+# HINWEIS: bmconds eigener PTY-Shim (/tmp/raw-uart-shim) bleibt /tmp-basiert
+# und braucht KEINE /dev-Writes.  ABER der multimacd-Shim (run.sh ab 2026.6.x)
+# fährt eq-3's multimacd mit, und DAS braucht /dev: modprobe eq3_char_loop +
+# /dev/eq3loop + /dev/mmd_{bidcos,hmip}.  Der frühere Kommentar „umgehen die
+# /dev-RO-Beschränkung ohne SYS_ADMIN/udev-Eskalation" gilt deshalb für den
+# multimacd-Pfad NICHT mehr.  Diese Keys spiegeln 1:1 die docker-compose-
+# cap_add-Liste (SYS_MODULE/MKNOD/SYS_NICE/SYS_RAWIO + device_cgroup 509:*)
+# auf das HA-Supervisor-Schema:
+#   kernel_modules → SYS_MODULE-Cap + /lib/modules ro (für `modprobe eq3_char_loop`)
+#   udev           → /run/udev ro + aktiviert den Supervisor-Hotplug-cgroup-Grant
+#                    für die zur Laufzeit erzeugten 509:* Slave-Nodes
+#   realtime       → SYS_NICE (multimacds FastMacResponder-rt-prio)
+#   devices        → cgroup-Allow-Liste; Nodes müssen NICHT vorab existieren
+#                    (Supervisor toleriert fehlende Einträge, grantet per udev nach)
+#   privileged: SYS_ADMIN → `mount -o rw,remount /dev` in run.sh, damit die
+#               mknod's der mmd-Nodes auf dem HAOS-RO-/dev greifen
+#   privileged: SYS_RAWIO → libusb_detach_kernel_driver (wie docker-compose)
+# VERIFIZIERT auf HAOS 17.3 (aarch64, Kernel 6.12.85-haos) am 2026-06-07:
+# mit diesem Satz + `kmod` im Dockerfile + dem openability-wait in run.sh
+# (head -c0 /dev/eq3loop bis der udev-Hotplug-cgroup-Grant landet) kommt
+# der volle Stack hoch — modprobe lädt eq3_char_loop, multimacd öffnet
+# /dev/eq3loop ohne EPERM, mmd_bidcos/mmd_hmip ready, rfd+HMIPServer starten.
+# Jede Zeile ist nötig: kernel_modules=modprobe, udev=Device-cgroup-Hotplug-
+# Grant (KRITISCH — ohne ihn EPERM auf /dev/eq3loop), realtime=multimacd-
+# rt-prio, devices=cgroup-Allow-Liste gegen die der Grant matcht, SYS_ADMIN=
+# /dev-remount für die mmd-mknods, SYS_RAWIO=libusb-detach.  KEIN full_access
+# nötig (least privilege).
+kernel_modules: true
+udev: true
+realtime: true
+devices:
+  - /dev/eq3loop
+  - /dev/mmd_bidcos
+  - /dev/mmd_hmip
+privileged:
+  - SYS_ADMIN
+  - SYS_RAWIO
 
 # Persistente State-Volumes:
 #   /data         — Add-On-default, hier landet pairing/state (rfd-keys etc.)

@@ -112,6 +112,7 @@ RUN apt-get update && \
         lighttpd \
         avahi-utils \
         jq nano procps \
+        kmod \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

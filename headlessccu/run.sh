@@ -289,8 +289,11 @@ fi
 # ein falsches child-exit-Signal sieht.  Hier: multimacd FOREGROUND.
 #
 # Container-Permissions die wir brauchen:
-#   - CAP_MKNOD (default in docker, in HAOS-Add-On via full_access)
-#   - CAP_SYS_MODULE (modprobe — falls Host eq3_char_loop nicht vor-geladen hat)
+#   - CAP_MKNOD (default im docker-cap-set; im HAOS-Add-On über die
+#     devices:-Liste + udev:true cgroup-grant, NICHT über full_access)
+#   - CAP_SYS_MODULE (modprobe — config.yaml kernel_modules:true; ODER
+#     Host hat eq3_char_loop vor-geladen)
+#   - CAP_SYS_ADMIN (mount -o rw,remount /dev — oben; HAOS-/dev ist ro)
 #   - sysfs lesbar (default /sys ist read-only-mount aber lesbar)
 echo "── Starting multimacd ──"
 
@@ -300,6 +303,20 @@ modprobe -q eq3_char_loop 2>/dev/null || {
   echo "WARN: modprobe eq3_char_loop fehlgeschlagen — "
   echo "      braucht CAP_SYS_MODULE im Container ODER vor-geladenes Host-Modul" >&2
 }
+
+# /dev rw machen falls read-only gemountet (HAOS-Supervisor bindet /dev
+# read_only=True ein — MOUNT_DEV).  Die mknod's der eq3loop/mmd-Nodes weiter
+# unten scheitern sonst mit EROFS.  Im docker-compose-Pfad ist /dev bereits
+# rw → der Test schlägt nicht an, kein Remount.  Braucht CAP_SYS_ADMIN
+# (config.yaml: privileged SYS_ADMIN); fehlt die Cap, ist der Remount ein
+# No-op und der mknod-Fallback meldet seinen eigenen Fehler.
+if ! { : > /dev/.bmcd-rwtest; } 2>/dev/null; then
+  echo "── /dev ist read-only — remount rw (für mknod der eq3loop/mmd-Nodes) ──"
+  mount -o rw,remount /dev 2>/dev/null || \
+    echo "  WARN: remount /dev rw fehlgeschlagen — braucht CAP_SYS_ADMIN; mknod kann scheitern" >&2
+else
+  rm -f /dev/.bmcd-rwtest 2>/dev/null || true
+fi
 
 # /dev/eq3loop mknod-Fallback (siehe start_multimacd.sh).
 # WICHTIG: auf `! -c` (kein char-dev) testen, NICHT `! -e` (existiert).
@@ -324,6 +341,29 @@ fi
 if [[ ! -c /dev/eq3loop ]]; then
   echo "ERROR: /dev/eq3loop fehlt und konnte nicht erzeugt werden — multimacd kann nicht starten" >&2
   exit 1
+fi
+
+# /dev/eq3loop EXISTIERT jetzt — aber im HAOS-Add-On ist es u.U. noch nicht
+# *öffenbar*: HA-Add-Ons können keine cgroup-Wildcard (wie docker-composes
+# `device_cgroup_rules: c 509:* rwm`) setzen.  Die `devices:`-Liste in
+# config.yaml gewährt den cgroup-Zugriff nur, wenn der Node beim Container-
+# Create schon existierte.  Wenn der Container das Modul gerade selbst via
+# modprobe geladen hat, erscheint /dev/eq3loop erst danach; der Supervisor
+# grantet die Device-cgroup dann per `udev: true`-Hotplug NACH dem
+# Modul-load-udev-Event — was ein paar hundert ms dauern kann.  Öffnet
+# multimacd /dev/eq3loop zu früh, scheitert es mit
+# "could not open master port /dev/eq3loop: Operation not permitted".
+# Darum hier warten bis der Node WIRKLICH lesbar ist (head -c0 = open+close
+# ohne Daten, gleiches Idiom wie eq-3's start_multimacd.sh).
+EQ3_OK=false
+for i in $(seq 1 40); do
+  if head -c0 /dev/eq3loop >/dev/null 2>&1; then EQ3_OK=true; echo "  /dev/eq3loop openable after $((i/2))s"; break; fi
+  sleep 0.5
+done
+if ! $EQ3_OK; then
+  echo "WARN: /dev/eq3loop nach 20s nicht öffenbar (cgroup-Grant fehlt?) —" >&2
+  echo "      multimacd kann mit EROFS/EPERM scheitern.  Auf HAOS: eq3_char_loop" >&2
+  echo "      ggf. host-seitig vorladen, oder devices:-Auflösung prüfen." >&2
 fi
 
 # multimacd-config mit Shim-Pfad.  /etc/multimacd.conf (von debmatic

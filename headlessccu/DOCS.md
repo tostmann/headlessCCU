@@ -50,23 +50,33 @@ Supported sticks via libusb-direct:
 
 Since the multimacd-shim architecture (2026.6.x) the stack runs eQ-3's
 `multimacd` inside the container.  multimacd needs `/dev/eq3loop`, whose
-kernel module **must be available on the host** — the container can only
-`modprobe` it (needs `CAP_SYS_MODULE`, granted in `docker-compose.yml`)
-or `mknod` the device node from sysfs if the host already loaded it.
+kernel module **must exist in the host's `/lib/modules`** for the running
+kernel — the container loads it with `modprobe eq3_char_loop` (needs
+`CAP_SYS_MODULE`) but cannot build a `.ko` itself.
 
-- **Debian / Raspberry Pi OS host:** the module ships in debmatic's
-  `pivccu-modules-dkms` package (DKMS-built for the running kernel).
-  Either install debmatic on the host, or build/load the module from
-  the piVCCU sources.  Verify with `modinfo eq3_char_loop`.
-- **Home Assistant OS:** the HAOS kernel does **not** ship this module
-  and add-ons cannot load external modules — the multimacd-shim path
-  therefore does **not** run on HAOS at the moment.  This is a known
-  limitation of the 2026.6.x line (the pre-2026.6 bmcond-native path
-  did not need it).
+- **Home Assistant OS:** **supported.**  HAOS ships `eq3_char_loop` and
+  `generic_raw_uart` as out-of-tree buildroot packages (since HAOS 6 /
+  `home-assistant/operating-system` PR #1266, actively maintained with
+  Linux-6.12/6.14 build patches).  The add-on requests the needed
+  privileges in `config.yaml`: `kernel_modules: true` (gives `SYS_MODULE`
+  + mounts host `/lib/modules` read-only), `udev: true`, `realtime: true`,
+  `devices: [/dev/eq3loop, /dev/mmd_bidcos, /dev/mmd_hmip]`, and
+  `privileged: [SYS_ADMIN, SYS_RAWIO]` (SYS_ADMIN lets `run.sh`
+  `mount -o rw,remount /dev` so the `mknod` of the mmd nodes works on
+  HAOS's read-only `/dev`).  This is the same privilege set RaspberryMatic
+  / OpenCCU's HA add-on uses.
+- **Debian / Raspberry Pi OS host (Supervised or plain Docker):** the
+  module ships in debmatic's `pivccu-modules-dkms` package (DKMS-built
+  for the running kernel).  Install debmatic on the host (or build/load
+  the module from the piVCCU sources) so it is present in `/lib/modules`.
+  Verify with `modinfo eq3_char_loop`.  The container cannot install it
+  for you — `/lib/modules` is mounted read-only.
 
-Failure signature when the module is missing:
+Failure signature when the module is missing from the host:
 `modprobe eq3_char_loop fehlgeschlagen` followed by
-`ERROR: /dev/eq3loop fehlt und konnte nicht erzeugt werden`.
+`ERROR: /dev/eq3loop fehlt und konnte nicht erzeugt werden`.  On HAOS this
+should not occur (module is in the image); on a plain-Debian host it means
+`pivccu-modules-dkms` is not installed/loaded.
 
 ### Legacy: cp210x-via-kernel path
 
