@@ -195,6 +195,12 @@ printf 'BidCoS-Address=0x%s\nSerialNumber=%s\n' "${HMID_LEGACY}" "${SERIAL}" > /
 
 # ── Trap / Cleanup ──
 PIDS=()
+declare -A SVC_NAME          # echte Service-PID → menschenlesbarer Name
+# Service-Start-Helper: NACH `cmd > >(stdbuf sed …) 2>&1 &` aufrufen.
+# Dank process-substitution ist $! die ECHTE Service-PID (nicht die des
+# sed-Log-Wrappers wie beim alten `cmd | sed &`-Pattern, das immer rc=0
+# meldete).  So kann `wait -n -p` beim Exit Service-Name + echten Code nennen.
+track() { local p=$!; PIDS+=("$p"); SVC_NAME[$p]="$1"; }
 shutdown_handler() {
   echo "── Shutdown ──"
   for p in "${PIDS[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
@@ -244,9 +250,9 @@ CONC_ARGS=(
   -V
 )
 echo "  args: ${CONC_ARGS[*]}"
-/usr/local/bin/busmatic-concentrator "${CONC_ARGS[@]}" 2>&1 \
-  | stdbuf -oL sed 's/^/[bmcond ] /' &
-PIDS+=($!)
+/usr/local/bin/busmatic-concentrator "${CONC_ARGS[@]}" \
+  > >(stdbuf -oL sed 's/^/[bmcond ] /') 2>&1 &
+track "bmcond"
 
 # Stale flash-busy-marker (älter als 5min) aufräumen — passiert wenn bmcond
 # bei einem vorherigen flash gekillt wurde.
@@ -381,9 +387,9 @@ grep -E "Coprocessor Device|Log Destination" /var/run/multimacd.conf
 # multimacd kein -d → foreground.  rt-scheduling-Setup vorher.
 sysctl -w kernel.sched_rt_runtime_us=-1 >/dev/null 2>&1 || \
   echo "  WARN: sched_rt_runtime_us setup failed — multimacd's rt-prio kann hängen"
-/bin/multimacd -f /var/run/multimacd.conf -l "$RFD_LOGLEVEL" -c 2>&1 \
-  | stdbuf -oL sed 's/^/[mmd    ] /' &
-PIDS+=($!)
+/bin/multimacd -f /var/run/multimacd.conf -l "$RFD_LOGLEVEL" -c \
+  > >(stdbuf -oL sed 's/^/[mmd    ] /') 2>&1 &
+track "multimacd"
 
 # Warten bis /sys/devices/virtual/eq3loop/mmd_*/dev erscheint (multimacd
 # registriert die Slave-Devices nach erstem erfolgreichem Coprocessor-
@@ -439,9 +445,9 @@ fi
 echo "── Starting rfd ──"
 LD_LIBRARY_PATH=/usr/share/debmatic/lib \
   /bin/rfd -c -l "$RFD_LOGLEVEL" \
-    -f /etc/config/rfd.conf 2>&1 \
-    | stdbuf -oL sed 's/^/[rfd    ] /' &
-PIDS+=($!)
+    -f /etc/config/rfd.conf \
+    > >(stdbuf -oL sed 's/^/[rfd    ] /') 2>&1 &
+track "rfd"
 sleep 2
 
 # ── 3. HMIPServer ──
@@ -494,9 +500,9 @@ if $HAS_HMIP; then
     -Dfile.encoding=ISO-8859-1 \
     -Dgnu.io.rxtx.SerialPorts=/tmp/mmd_hmip \
     -cp "${CLAZZPATH}:/opt/HMServer/HMIPServer.jar" \
-    de.eq3.ccu.server.ip.HMIPServer /var/run/crRFD.conf /etc/HMServer.conf 2>&1 \
-      | stdbuf -oL sed 's/^/[hmsrv  ] /' &
-  PIDS+=($!)
+    de.eq3.ccu.server.ip.HMIPServer /var/run/crRFD.conf /etc/HMServer.conf \
+      > >(stdbuf -oL sed 's/^/[hmsrv  ] /') 2>&1 &
+  track "HMIPServer"
   sleep 3
 else
   echo "── HMIPServer skipped (HMIP disabled) ──"
@@ -510,9 +516,9 @@ REGA_MOCK_PORT=8765 \
 REGA_MOCK_LOG_LEVEL="$REGA_MOCK_LOG" \
 REGA_MOCK_UNKNOWN_STRATEGY=lenient \
 REGA_MOCK_BMCD_URL=http://127.0.0.1:9126/api/status \
-  /usr/bin/python3 -u /usr/local/bin/rega_session_mock.py 2>&1 \
-    | stdbuf -oL sed 's/^/[regamck] /' &
-PIDS+=($!)
+  /usr/bin/python3 -u /usr/local/bin/rega_session_mock.py \
+    > >(stdbuf -oL sed 's/^/[regamck] /') 2>&1 &
+track "rega_session_mock"
 sleep 0.5
 
 # ── 5. ping_shim — XML-RPC reverse-proxies mit ping-pong-Interception ──
@@ -522,23 +528,23 @@ sleep 0.5
 # alle ~30s die Entities auf "unavailable" flippt.
 echo "── Starting ping_shim (BidCoS :2001 → rfd :32001) ──"
 /usr/bin/python3 -u /usr/local/bin/ping_shim.py \
-    --listen-port 2001 --upstream-port 32001 --name bidcos-shim 2>&1 \
-  | stdbuf -oL sed 's/^/[pingshim] /' &
-PIDS+=($!)
+    --listen-port 2001 --upstream-port 32001 --name bidcos-shim \
+  > >(stdbuf -oL sed 's/^/[pingshim] /') 2>&1 &
+track "ping_shim-bidcos"
 if $HAS_HMIP; then
   echo "── Starting ping_shim (HmIP :2010 → HMIPServer :32010) ──"
   /usr/bin/python3 -u /usr/local/bin/ping_shim.py \
-      --listen-port 2010 --upstream-port 32010 --name hmip-shim 2>&1 \
-    | stdbuf -oL sed 's/^/[pingshim] /' &
-  PIDS+=($!)
+      --listen-port 2010 --upstream-port 32010 --name hmip-shim \
+    > >(stdbuf -oL sed 's/^/[pingshim] /') 2>&1 &
+  track "ping_shim-hmip"
 fi
 sleep 0.5
 
 # ── 6. lighttpd (foreground) ──
 echo "── Starting lighttpd ──"
-/usr/sbin/lighttpd -D -f /etc/lighttpd/lighttpd.conf 2>&1 \
-  | stdbuf -oL sed 's/^/[lighttpd] /' &
-PIDS+=($!)
+/usr/sbin/lighttpd -D -f /etc/lighttpd/lighttpd.conf \
+  > >(stdbuf -oL sed 's/^/[lighttpd] /') 2>&1 &
+track "lighttpd"
 
 echo
 echo "═════════════════════════════════════════════════════════════"
@@ -554,7 +560,8 @@ fi
 echo "  :9126  → bmcond JSON-API (status/health, internal)"
 echo "═════════════════════════════════════════════════════════════"
 
-wait -n "${PIDS[@]}"
+DIED=""
+wait -n -p DIED "${PIDS[@]}"
 RC=$?
 
 # Wenn bmcond's POST /api/reload das Container-Init-Re-Exec angefordert
@@ -592,5 +599,11 @@ if [[ -f /var/run/bmcd-reload-requested ]]; then
   exec "$0" "$@"
 fi
 
-echo "── A child exited unexpectedly (rc=$RC) ──"
+# DIED (von wait -n -p) = die echte Service-PID; leer nur im Edge-Case.
+# Index NUR bei nicht-leerem DIED (leerer Array-Index = bash-Fehler).
+DIED_NAME="pid ${DIED:-?}"
+[[ -n "$DIED" ]] && DIED_NAME="${SVC_NAME[$DIED]:-pid $DIED}"
+echo "── A child exited: '$DIED_NAME' (pid ${DIED:-?}) exited rc=$RC ──"
+echo "──   rc = ECHTER Service-Exit-Code (vorher war's immer der sed-Wrapper = 0).   ──"
+echo "──   Ursache: die Logzeilen dieses Services weiter oben.                       ──"
 shutdown_handler
