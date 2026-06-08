@@ -469,10 +469,48 @@ rfd_supervised() {
       echo "[rfd] gab nach $tries schnellen Fehlversuchen auf (letzter rc=$rc, lief ${dur}s)" >&2
       return "$rc"
     fi
-    echo "[rfd] exited rc=$rc nach ${dur}s (Fehlversuch $tries/${RFD_MAX_TRIES:-8}) — multimacd evtl. noch nicht bereit (Identify leer?); retry in ${RFD_RETRY_DELAY:-4}s" >&2
-    sleep "${RFD_RETRY_DELAY:-4}"
+    echo "[rfd] exited rc=$rc nach ${dur}s (Fehlversuch $tries/${RFD_MAX_TRIES:-8}) — multimacd evtl. noch nicht bereit (Identify leer?); retry in ${RFD_RETRY_DELAY:-1}s" >&2
+    sleep "${RFD_RETRY_DELAY:-1}"
   done
 }
+# Boot-Hygiene-Gate (Ground-Truth: OpenCCU/RaspberryMatic S60multimacd
+# waitStartupComplete): rfd erst starten, wenn multimacds eq3loop-Slave-Channel
+# WIRKLICH bedient wird — nicht schon wenn der /dev-Node existiert.
+# /dev/mmd_bidcos taucht auf, SOBALD multimacd den eq3loop-Master öffnet (reine
+# Node-Existenz), aber rfds improvedInit-Identify liefert "" bis multimacd den
+# Slave tatsächlich bedient (unter qemu-usb-host-Passthrough eine jitternde
+# Verzögerung danach; nativ quasi sofort).  OpenCCU pollt darum eine echte
+# Read-Probe `head -c0` auf die mmd-Slaves bis sie aufgeht, BEVOR es rfd (S61)
+# startet — deterministisch + ohne Tax auf nativ, statt eines geratenen sleeps
+# (der traf unter Jitter in ~2/10 Boots zu knapp).  Read-Probe `timeout`-gewrappt
+# falls open() je blockt.  Bounded auf ${RFD_GATE_MAX:-15}s; danach rfd trotzdem
+# starten — der rfd_supervised-Retry-Loop ist der Backstop.
+gate_deadline=$(( $(date +%s) + ${RFD_GATE_MAX:-15} ))
+gate_hit=0
+while [[ $(date +%s) -lt $gate_deadline ]]; do
+  if timeout 1 head -c0 /dev/mmd_bidcos >/dev/null 2>&1 \
+     && { ! $HAS_HMIP || timeout 1 head -c0 /dev/mmd_hmip >/dev/null 2>&1; }; then
+    gate_hit=1; break
+  fi
+  sleep 0.25
+done
+if [[ $gate_hit -eq 1 ]]; then
+  echo "  rfd-gate: mmd-Slaves serviced (head -c0 OK nach $(( $(date +%s) - (gate_deadline - ${RFD_GATE_MAX:-15}) ))s)"
+else
+  echo "  WARN: rfd-gate timeout (${RFD_GATE_MAX:-15}s) — head -c0 auf mmd-Slaves nie OK; starte rfd trotzdem, Retry-Loop fängt's" >&2
+fi
+
+# Ground-Truth (OpenCCU S61rfd): nur sinnvoll, wenn rfd.conf überhaupt einen
+# [Interface N]-Block hat.  Fehlt er (bmconds confgen lieferte keine BidCoS-
+# Interface, z.B. weil die Stick-Probe fehlschlug), findet rfd keine Hardware,
+# exitet sauber, und verbrennt das volle RFD_MAX_TRIES-Budget mit irreführendem
+# rc.  Advisory-WARN mit klarer Ursache (Start läuft trotzdem; der wait-n-Exit
+# nennt am Ende den echten Grund) — wandelt einen langsamen, verwirrenden
+# Fehlschlag in eine sofort diagnostizierbare Meldung.
+if ! grep -qE '^\[Interface [0-9]+\]' /etc/config/rfd.conf 2>/dev/null; then
+  echo "  WARN: /etc/config/rfd.conf hat keinen [Interface N]-Block — bmcond-confgen lieferte keine BidCoS-Interface (Stick-Probe fehlgeschlagen?); rfd findet keine Hardware" >&2
+fi
+
 echo "── Starting rfd (Identify-Race-Retry, max ${RFD_MAX_TRIES:-8}) ──"
 rfd_supervised > >(stdbuf -oL sed 's/^/[rfd    ] /') 2>&1 &
 track "rfd"
@@ -523,15 +561,25 @@ if $HAS_HMIP; then
   # zusätzlich die OCCU-kanonische Datei (manche HMServer-Pfade lesen die):
   printf 'Network.Key=%s\n' "${HMIP_NETWORK_KEY}" > /etc/config/hmip_networkkey.conf
 
-  "$JAVA_HOME/bin/java" -Xmx128m \
-    -Dlog4j.configurationFile=file:///etc/config/log4j2.xml \
-    -Dfile.encoding=ISO-8859-1 \
-    -Dgnu.io.rxtx.SerialPorts=/tmp/mmd_hmip \
-    -cp "${CLAZZPATH}:/opt/HMServer/HMIPServer.jar" \
-    de.eq3.ccu.server.ip.HMIPServer /var/run/crRFD.conf /etc/HMServer.conf \
-      > >(stdbuf -oL sed 's/^/[hmsrv  ] /') 2>&1 &
-  track "HMIPServer"
-  sleep 3
+  # Ground-Truth (OpenCCU S62HMServer): erst prüfen, dass der HmIP-Serial-Node
+  # ein Char-Device ist, BEVOR die 128-MB-JVM startet.  Fehlt /dev/mmd_hmip
+  # (multimacd-HmIP-Slave nie erzeugt), würde java-rxtx auf einem nicht
+  # existenten Serial-Port blockieren/spinnen — JVM hängt + frisst RAM für
+  # nichts.  Dann HMIPServer sauber überspringen (BidCoS bleibt nutzbar;
+  # Container NICHT runterfahren).
+  if [[ -c /tmp/mmd_hmip || -c /dev/mmd_hmip ]]; then
+    "$JAVA_HOME/bin/java" -Xmx128m \
+      -Dlog4j.configurationFile=file:///etc/config/log4j2.xml \
+      -Dfile.encoding=ISO-8859-1 \
+      -Dgnu.io.rxtx.SerialPorts=/tmp/mmd_hmip \
+      -cp "${CLAZZPATH}:/opt/HMServer/HMIPServer.jar" \
+      de.eq3.ccu.server.ip.HMIPServer /var/run/crRFD.conf /etc/HMServer.conf \
+        > >(stdbuf -oL sed 's/^/[hmsrv  ] /') 2>&1 &
+    track "HMIPServer"
+    sleep 3
+  else
+    echo "  ERROR: /dev/mmd_hmip ist kein Char-Device — HMIPServer übersprungen (multimacd-HmIP-Slave nicht erzeugt); BidCoS bleibt aktiv" >&2
+  fi
 else
   echo "── HMIPServer skipped (HMIP disabled) ──"
 fi

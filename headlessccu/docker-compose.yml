@@ -26,7 +26,7 @@
 
 services:
   headlessccu:
-    image: headlessccu:2026.6.9
+    image: headlessccu:2026.6.10
     build:
       # Build-Kontext = dieses Verzeichnis (HA-Supervisor-Konvention).
       # bmcond-Source wird vom Dockerfile selbst via git clone gezogen —
