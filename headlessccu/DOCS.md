@@ -138,6 +138,15 @@ the radio buttons are **pre-selected** — just click **"Speichern + Reload"**
 to persist and restart the stack.  The reload triggers a clean
 container restart via the Supervisor API.
 
+### Automatic restart after a crash (Watchdog)
+
+If one of the services (bmcond, multimacd, rfd, HMIPServer, …) exits
+unexpectedly, the add-on stops all remaining services in order and exits
+with a non-zero code.  Home Assistant only restarts it when the
+**Watchdog** switch on the add-on page is enabled (it is off by default);
+the add-on log shows a warning at startup while it is disabled.  With the
+plain `docker compose` setup, `restart: unless-stopped` takes care of this.
+
 ### Maintenance mode (unsupported radio firmware)
 
 The eQ-3 stack (multimacd) only runs with **DualCoPro** coprocessor

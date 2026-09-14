@@ -237,7 +237,7 @@ term_and_wait() {
 #   1. rfd (Supervisor-Subshell leitet SIGTERM an rfd weiter) + HMIPServer
 #   2. multimacd
 #   3. bmcond und alle übrigen (Mock, Shims, lighttpd)
-# Summe der Timeouts 7 s — Docker und der HA-Supervisor schicken nach 10 s
+# Summe der Timeouts 8 s — Docker und der HA-Supervisor schicken nach 10 s
 # SIGKILL; der Rest ist Reserve für die Trap-Latenz (siehe `sleep … & wait`).
 stop_stack_ordered() {
   local p first=() second=() rest=()
@@ -248,9 +248,9 @@ stop_stack_ordered() {
       *)              rest+=("$p") ;;
     esac
   done
-  term_and_wait 4000 "${first[@]}"
+  term_and_wait 3500 "${first[@]}"
   term_and_wait 2000 "${second[@]}"
-  term_and_wait 1000 "${rest[@]}"
+  term_and_wait 2500 "${rest[@]}"   # bmcond: USB-RX-Thread 200 ms + API-select bis 1 s
 }
 shutdown_handler() {
   trap '' TERM INT          # ein zweites SIGTERM startet keinen zweiten Durchlauf
@@ -267,6 +267,17 @@ fatal_shutdown() {
   trap '' TERM INT
   stop_stack_ordered
   exit 1
+}
+# Ein Dienst ist unerwartet beendet: Rest geordnet stoppen und mit rc≠0 enden.
+# rc 0 würde den Absturz verdecken — Docker `restart: on-failure` griffe nicht,
+# das Supervisor-Log meldete keinen Exit-Code.  Ein Dienst-rc von 0 zählt hier
+# ebenfalls als Fehler (alle Dienste sind Dauerläufer) → rc 1.
+failure_exit() {
+  local rc=$1
+  trap '' TERM INT
+  echo "── Stopping remaining services after unexpected exit (container rc=$(( rc == 0 ? 1 : rc ))) ──" >&2
+  stop_stack_ordered
+  exit $(( rc == 0 ? 1 : rc ))
 }
 # HTTP-Helfer: das Runtime-Image hat kein curl/wget (curl nur in der Build-
 # Stage), python3 ist da.  http_get URL → Body auf stdout (leer bei Fehler).
@@ -285,12 +296,24 @@ except Exception:
 # sauber released).  Sonst (Standalone-Docker oder kein API-Token):
 # geordneter Stop + in-container re-exec (pkill auf die eigenen Kinder als
 # Nachlese — nicht `-P 1`: unter HA ist tini PID 1 und run.sh dessen Kind).
+export SUPERVISOR_API=${SUPERVISOR_API:-http://supervisor}
+# supervisor_get PATH → Body auf stdout (leer bei Fehler / ohne Token).
+supervisor_get() {
+  [[ -n "${SUPERVISOR_TOKEN:-}" ]] || return 0
+  python3 -c 'import os, sys, urllib.request
+req = urllib.request.Request(os.environ["SUPERVISOR_API"] + sys.argv[1],
+      headers={"Authorization": "Bearer " + os.environ["SUPERVISOR_TOKEN"]})
+try:
+    sys.stdout.write(urllib.request.urlopen(req, timeout=3).read().decode())
+except Exception:
+    pass' "$1" 2>/dev/null
+}
 restart_init() {
   echo "── $1 — restarting init ──"
   if [[ -n "${SUPERVISOR_TOKEN:-}" ]]; then
     echo "── Asking Supervisor to restart this add-on ──"
     python3 -c 'import os, urllib.request
-req = urllib.request.Request("http://supervisor/addons/self/restart", method="POST",
+req = urllib.request.Request(os.environ["SUPERVISOR_API"] + "/addons/self/restart", method="POST",
       headers={"Authorization": "Bearer " + os.environ["SUPERVISOR_TOKEN"]})
 try:
     urllib.request.urlopen(req, timeout=5)
@@ -314,6 +337,18 @@ except Exception as e:
   sleep 1
   exec "$0" "${INIT_ARGS[@]}"
 }
+
+# ── 0. HA-Watchdog-Hinweis ──
+# Stirbt ein Dienst, endet der Container mit rc≠0 (failure_exit).  Unter Docker
+# Compose startet `restart: unless-stopped` neu; unter Home Assistant nur, wenn
+# der Watchdog-Schalter des Add-ons an ist (Supervisor-Default: aus).
+if [[ -n "${SUPERVISOR_TOKEN:-}" ]]; then
+  if [[ "$(supervisor_get /addons/self/info | jq -r '.data.watchdog' 2>/dev/null)" == "false" ]]; then
+    echo "WARN: the Home Assistant watchdog for this add-on is disabled — if a service" >&2
+    echo "      crashes, the add-on stops and is NOT restarted automatically." >&2
+    echo "      Enable \"Watchdog\" on the add-on page." >&2
+  fi
+fi
 
 # ── 1. busmatic-concentrator (= bmcond) ──
 # bmcond 2026.5.7+ ist pure userspace radio-transport: byte-pump zwischen
@@ -430,7 +465,7 @@ if [[ "$(jq -r '.backends[0].firmware_compatible' <<<"$maint_json" 2>/dev/null)"
     if ! kill -0 "$BMCOND_PID" 2>/dev/null; then
       wait "$BMCOND_PID" 2>/dev/null; maint_rc=$?
       echo "── maintenance mode: bmcond exited rc=$maint_rc ──" >&2
-      shutdown_handler
+      failure_exit "$maint_rc"
     fi
     sleep 2 & wait $!
   done
@@ -862,8 +897,8 @@ RC=$?
 # geschrieben.  In dem Fall: alle anderen Kinder kontrolliert beenden und
 # uns selbst re-execen.  HA-Supervisor sieht keinen Container-Exit
 # (Process bleibt am Leben), pollt weiter, alles smooth.  Bei jedem
-# anderen Child-Exit: klassischer Shutdown (RC ≠ 0 ist hier ok — HA
-# kann's dann als Crash behandeln + watchdog kicken).
+# anderen Child-Exit: geordneter Stop + Container-Exit mit rc≠0
+# (failure_exit) — Docker-Restart-Policy bzw. HA-Watchdog starten neu.
 if [[ -f /var/run/bmcd-reload-requested ]]; then
   rm -f /var/run/bmcd-reload-requested
   restart_init "/api/reload self-restart requested"
@@ -876,4 +911,4 @@ DIED_NAME="pid ${DIED:-?}"
 echo "── A child exited: '$DIED_NAME' (pid ${DIED:-?}) exited rc=$RC ──"
 echo "──   rc = ECHTER Service-Exit-Code (vorher war's immer der sed-Wrapper = 0).   ──"
 echo "──   Ursache: die Logzeilen dieses Services weiter oben.                       ──"
-shutdown_handler
+failure_exit "$RC"
