@@ -202,11 +202,60 @@ declare -A SVC_NAME          # echte Service-PID → menschenlesbarer Name
 # sed-Log-Wrappers wie beim alten `cmd | sed &`-Pattern, das immer rc=0
 # meldete).  So kann `wait -n -p` beim Exit Service-Name + echten Code nennen.
 track() { local p=$!; PIDS+=("$p"); SVC_NAME[$p]="$1"; }
+
+# Läuft der Prozess noch?  `kill -0` allein reicht nicht: ein beendetes, noch
+# nicht per wait eingesammeltes Kind (Zombie) antwortet weiter auf kill -0.
+svc_alive() {
+  local st
+  st=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null) || return 1
+  [[ -n "$st" && "${st%% *}" != "Z" ]]
+}
+# SIGTERM an eine Gruppe, bis zu $1 ms auf ihr Ende warten, Rest mit SIGKILL.
+term_and_wait() {
+  local timeout_ms=$1 p alive deadline; shift
+  (( $# )) || return 0
+  for p in "$@"; do kill -TERM "$p" 2>/dev/null || true; done
+  deadline=$(( $(date +%s%3N) + timeout_ms ))
+  while :; do
+    alive=0
+    for p in "$@"; do svc_alive "$p" && alive=1; done
+    (( alive )) || return 0
+    (( $(date +%s%3N) >= deadline )) && break
+    sleep 0.1
+  done
+  for p in "$@"; do
+    if svc_alive "$p"; then
+      echo "  WARN: ${SVC_NAME[$p]:-pid $p} reagiert nicht auf SIGTERM — SIGKILL" >&2
+      kill -KILL "$p" 2>/dev/null || true
+    fi
+  done
+}
+# Dienste in umgekehrter Abhängigkeit stoppen (wie OpenCCU: S62HMIPServer /
+# S61rfd vor S60multimacd).  rfd liest /dev/mmd_bidcos; beendet sich multimacd
+# zuerst, liefert read() -ENODEV, rfd's ReadData() rechnet das als unsigned
+# Länge und bricht mit std::length_error → abort → Coredump ab.  Darum:
+#   1. rfd (Supervisor-Subshell leitet SIGTERM an rfd weiter) + HMIPServer
+#   2. multimacd
+#   3. bmcond und alle übrigen (Mock, Shims, lighttpd)
+# Summe der Timeouts 7 s — Docker und der HA-Supervisor schicken nach 10 s
+# SIGKILL; der Rest ist Reserve für die Trap-Latenz (siehe `sleep … & wait`).
+stop_stack_ordered() {
+  local p first=() second=() rest=()
+  for p in "${PIDS[@]}"; do
+    case "${SVC_NAME[$p]:-}" in
+      rfd|HMIPServer) first+=("$p") ;;
+      multimacd)      second+=("$p") ;;
+      *)              rest+=("$p") ;;
+    esac
+  done
+  term_and_wait 4000 "${first[@]}"
+  term_and_wait 2000 "${second[@]}"
+  term_and_wait 1000 "${rest[@]}"
+}
 shutdown_handler() {
+  trap '' TERM INT          # ein zweites SIGTERM startet keinen zweiten Durchlauf
   echo "── Shutdown ──"
-  for p in "${PIDS[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
-  sleep 1
-  for p in "${PIDS[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
+  stop_stack_ordered
   exit 0
 }
 trap shutdown_handler TERM INT
@@ -215,18 +264,10 @@ trap shutdown_handler TERM INT
 fatal_shutdown() {
   echo "ERROR: $1" >&2
   echo "── Fatal init error — stopping all services (rc=1) ──" >&2
-  for p in "${PIDS[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
-  sleep 1
-  for p in "${PIDS[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
+  trap '' TERM INT
+  stop_stack_ordered
   exit 1
 }
-# Init komplett neu starten (Grund in $1).  Genutzt von bmcond's /api/reload
-# (Marker bmcd-reload-requested) und vom Wartungsmodus nach erfolgreichem
-# Firmware-Flash (Marker bmcd-flash-ok).
-# Unter HA-Supervisor (SUPERVISOR_TOKEN gesetzt) → sauberer Container-Restart
-# über die Supervisor-API (frisches Network-Namespace, alle Listen-Sockets
-# sauber released).  Sonst (Standalone-Docker oder kein API-Token):
-# in-container re-exec mit pkill-P-1-Pfad (best-effort).
 # HTTP-Helfer: das Runtime-Image hat kein curl/wget (curl nur in der Build-
 # Stage), python3 ist da.  http_get URL → Body auf stdout (leer bei Fehler).
 http_get() {
@@ -236,6 +277,14 @@ try:
 except Exception:
     pass' "$1" 2>/dev/null
 }
+# Init komplett neu starten (Grund in $1).  Genutzt von bmcond's /api/reload
+# (Marker bmcd-reload-requested) und vom Wartungsmodus nach erfolgreichem
+# Firmware-Flash (Marker bmcd-flash-ok).
+# Unter HA-Supervisor (SUPERVISOR_TOKEN gesetzt) → sauberer Container-Restart
+# über die Supervisor-API (frisches Network-Namespace, alle Listen-Sockets
+# sauber released).  Sonst (Standalone-Docker oder kein API-Token):
+# geordneter Stop + in-container re-exec (pkill auf die eigenen Kinder als
+# Nachlese — nicht `-P 1`: unter HA ist tini PID 1 und run.sh dessen Kind).
 restart_init() {
   echo "── $1 — restarting init ──"
   if [[ -n "${SUPERVISOR_TOKEN:-}" ]]; then
@@ -249,15 +298,19 @@ except Exception as e:
     print("   supervisor restart request failed:", e)' || true
     # Supervisor schickt SIGTERM an Container — wir warten passiv
     # (max 60s; danach würde Supervisor SIGKILL nachschießen)
-    sleep 60
+    # Hintergrund-sleep + wait: bash führt den TERM-Trap erst nach einem
+    # Vordergrund-Kommando aus — ein `sleep 60` hielte das SIGTERM des
+    # Supervisors bis zu dessen SIGKILL (10 s) zurück, ohne geordneten Stop.
+    sleep 60 & wait $!
     # falls Supervisor's stop nicht durchkam, fallback: aufgeben
     echo "── Supervisor restart did not arrive within 60s — falling through ──"
   fi
   # Fallback / Standalone-Pfad
   echo "── Fallback: in-container re-exec ──"
-  pkill -TERM -P 1 2>/dev/null || true
+  stop_stack_ordered
+  pkill -TERM -P $$ 2>/dev/null || true
   sleep 2
-  pkill -KILL -P 1 2>/dev/null || true
+  pkill -KILL -P $$ 2>/dev/null || true
   sleep 1
   exec "$0" "${INIT_ARGS[@]}"
 }
@@ -379,7 +432,7 @@ if [[ "$(jq -r '.backends[0].firmware_compatible' <<<"$maint_json" 2>/dev/null)"
       echo "── maintenance mode: bmcond exited rc=$maint_rc ──" >&2
       shutdown_handler
     fi
-    sleep 2
+    sleep 2 & wait $!
   done
 fi
 
@@ -554,13 +607,31 @@ fi
 # setzen, damit ein späterer echter Crash nicht vom Startup-Budget aufgefressen
 # wird.  Nach RFD_MAX_TRIES schnellen Fehlversuchen aufgeben → Container-Exit
 # mit rfds echtem rc (der self-diagnostizierende Supervisor nennt 'rfd').
+#
+# rfd läuft im Hintergrund der Subshell, damit ein SIGTERM an die Subshell (vom
+# geordneten Stop) per trap an rfd weitergereicht wird — ein Vordergrund-Kind
+# würde den trap bis zu seinem Ende blockieren, die Subshell stürbe allein und
+# rfd bliebe verwaist bis zum multimacd-Ende (→ abort/Core, siehe
+# stop_stack_ordered).
 rfd_supervised() {
-  local tries=0 rc start dur
+  local tries=0 rc start dur rfd_pid="" stopping=0
+  trap 'stopping=1; [[ -n "$rfd_pid" ]] && kill -TERM "$rfd_pid" 2>/dev/null' TERM
   while true; do
+    (( stopping )) && return 0
     start=$(date +%s)
     LD_LIBRARY_PATH=/usr/share/debmatic/lib \
-      /bin/rfd -c -l "$RFD_LOGLEVEL" -f /etc/config/rfd.conf
-    rc=$?
+      /bin/rfd -c -l "$RFD_LOGLEVEL" -f /etc/config/rfd.conf &
+    rfd_pid=$!
+    # TERM kam zwischen Schleifenkopf und $! an → der trap sah noch kein rfd_pid
+    (( stopping )) && kill -TERM "$rfd_pid" 2>/dev/null
+    wait "$rfd_pid"; rc=$?
+    # wait kehrt beim trap sofort zurück (rc 143), rfd läuft dann noch kurz.
+    while kill -0 "$rfd_pid" 2>/dev/null; do wait "$rfd_pid"; rc=$?; done
+    rfd_pid=""
+    if (( stopping )); then
+      echo "[rfd] beendet nach SIGTERM (rc=$rc)" >&2
+      return 0
+    fi
     dur=$(( $(date +%s) - start ))
     [[ $dur -ge 60 ]] && tries=0          # echter Lauf → Budget reset
     tries=$((tries+1))
@@ -569,7 +640,9 @@ rfd_supervised() {
       return "$rc"
     fi
     echo "[rfd] exited rc=$rc nach ${dur}s (Fehlversuch $tries/${RFD_MAX_TRIES:-8}) — multimacd evtl. noch nicht bereit (Identify leer?); retry in ${RFD_RETRY_DELAY:-1}s" >&2
-    sleep "${RFD_RETRY_DELAY:-1}"
+    # sleep im Hintergrund + wait: bleibt für den TERM-trap unterbrechbar.
+    sleep "${RFD_RETRY_DELAY:-1}" & wait $! 2>/dev/null
+    (( stopping )) && return 0
   done
 }
 # Readiness-Gate vor rfd, drei Stufen:
@@ -658,7 +731,7 @@ fi
 echo "── Starting rfd (Identify-Race-Retry, max ${RFD_MAX_TRIES:-8}) ──"
 rfd_supervised > >(stdbuf -oL sed 's/^/[rfd    ] /') 2>&1 &
 track "rfd"
-sleep 2
+sleep 2 & wait $!   # trap-unterbrechbar (siehe restart_init)
 
 # ── 3. HMIPServer ──
 # HmIP-side eq-3-Java-Daemon.  Bei vorhandenem HM_HMIP_DEV nimmt debmatic
@@ -720,7 +793,7 @@ if $HAS_HMIP; then
       de.eq3.ccu.server.ip.HMIPServer /var/run/crRFD.conf /etc/HMServer.conf \
         > >(stdbuf -oL sed 's/^/[hmsrv  ] /') 2>&1 &
     track "HMIPServer"
-    sleep 3
+    sleep 3 & wait $!
   else
     echo "  ERROR: /dev/mmd_hmip ist kein Char-Device — HMIPServer übersprungen (multimacd-HmIP-Slave nicht erzeugt); BidCoS bleibt aktiv" >&2
   fi
