@@ -6,6 +6,7 @@
 # Lizenz: GPL-2.0-or-later
 
 set -uo pipefail
+INIT_ARGS=("$@")   # für restart_init (re-exec mit denselben Argumenten)
 
 # ── Konfig: HA Add-On (/data/options.json) ODER env-vars (plain docker) ──
 if [[ -f /data/options.json ]]; then
@@ -209,6 +210,57 @@ shutdown_handler() {
   exit 0
 }
 trap shutdown_handler TERM INT
+# Wie shutdown_handler, aber mit rc≠0 und Ursache — für Init-Zustände, aus
+# denen der Stack nicht von selbst herausfindet (Supervisor/Docker startet neu).
+fatal_shutdown() {
+  echo "ERROR: $1" >&2
+  echo "── Fatal init error — stopping all services (rc=1) ──" >&2
+  for p in "${PIDS[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
+  sleep 1
+  for p in "${PIDS[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
+  exit 1
+}
+# Init komplett neu starten (Grund in $1).  Genutzt von bmcond's /api/reload
+# (Marker bmcd-reload-requested) und vom Wartungsmodus nach erfolgreichem
+# Firmware-Flash (Marker bmcd-flash-ok).
+# Unter HA-Supervisor (SUPERVISOR_TOKEN gesetzt) → sauberer Container-Restart
+# über die Supervisor-API (frisches Network-Namespace, alle Listen-Sockets
+# sauber released).  Sonst (Standalone-Docker oder kein API-Token):
+# in-container re-exec mit pkill-P-1-Pfad (best-effort).
+# HTTP-Helfer: das Runtime-Image hat kein curl/wget (curl nur in der Build-
+# Stage), python3 ist da.  http_get URL → Body auf stdout (leer bei Fehler).
+http_get() {
+  python3 -c 'import sys, urllib.request
+try:
+    sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=3).read().decode())
+except Exception:
+    pass' "$1" 2>/dev/null
+}
+restart_init() {
+  echo "── $1 — restarting init ──"
+  if [[ -n "${SUPERVISOR_TOKEN:-}" ]]; then
+    echo "── Asking Supervisor to restart this add-on ──"
+    python3 -c 'import os, urllib.request
+req = urllib.request.Request("http://supervisor/addons/self/restart", method="POST",
+      headers={"Authorization": "Bearer " + os.environ["SUPERVISOR_TOKEN"]})
+try:
+    urllib.request.urlopen(req, timeout=5)
+except Exception as e:
+    print("   supervisor restart request failed:", e)' || true
+    # Supervisor schickt SIGTERM an Container — wir warten passiv
+    # (max 60s; danach würde Supervisor SIGKILL nachschießen)
+    sleep 60
+    # falls Supervisor's stop nicht durchkam, fallback: aufgeben
+    echo "── Supervisor restart did not arrive within 60s — falling through ──"
+  fi
+  # Fallback / Standalone-Pfad
+  echo "── Fallback: in-container re-exec ──"
+  pkill -TERM -P 1 2>/dev/null || true
+  sleep 2
+  pkill -KILL -P 1 2>/dev/null || true
+  sleep 1
+  exec "$0" "${INIT_ARGS[@]}"
+}
 
 # ── 1. busmatic-concentrator (= bmcond) ──
 # bmcond 2026.5.7+ ist pure userspace radio-transport: byte-pump zwischen
@@ -250,9 +302,11 @@ CONC_ARGS=(
   -V
 )
 echo "  args: ${CONC_ARGS[*]}"
+rm -f /var/run/bmcd-flash-ok   # nur im Wartungsmodus dieses Laufs relevant
 /usr/local/bin/busmatic-concentrator "${CONC_ARGS[@]}" \
   > >(stdbuf -oL sed 's/^/[bmcond ] /') 2>&1 &
 track "bmcond"
+BMCOND_PID=$!
 
 # Stale flash-busy-marker (älter als 5min) aufräumen — passiert wenn bmcond
 # bei einem vorherigen flash gekillt wurde.
@@ -278,15 +332,55 @@ while [[ -f /var/run/bmcd-flash-job.json || -f /var/run/bmcd-flash-busy ]]; do
   sleep 2; WAIT=$((WAIT+2))
 done
 
-# Auf bmcond's PTY-Symlink warten (max 15s).  Multimacd erzeugt
-# /dev/mmd_{bidcos,hmip} erst NACHDEM es seine Coprocessor-Verbindung
-# über /tmp/raw-uart-shim aufgebaut hat.
+# Auf bmcond's PTY-Symlink warten (max 15s) — multimacd öffnet ihn als
+# "Coprocessor Device Path".
 for i in $(seq 1 30); do
   [[ -e /tmp/raw-uart-shim ]] && break
   sleep 0.5
 done
 if ! [[ -e /tmp/raw-uart-shim ]]; then
   echo "WARN: /tmp/raw-uart-shim did not appear within 15s" >&2
+fi
+
+# ── 1a. Wartungsmodus bei inkompatibler Coprocessor-Firmware ──
+# bmcond meldet über /api/effective, ob der Coprocessor DualCoPro_App fährt.
+# Bei HMIP_TRX_App (reine HmIP-FW) oder Co_CPU_App (reine BidCoS-FW) beendet
+# sich multimacd mit "Please install DualCoPro Firmware" — der Stack käme nie
+# hoch, der Container liefe in eine Neustart-Schleife und die WebUI wäre für
+# einen Firmware-Flash kaum erreichbar.  Darum: nur bmcond weiterlaufen lassen
+# (WebUI/API :9126 inkl. Flash), keine weiteren Dienste starten.  Nach einem
+# erfolgreichen Flash legt bmcond /var/run/bmcd-flash-ok an → Init startet neu
+# und fährt mit der neuen Firmware den vollen Stack.  Ist die API nicht
+# erreichbar oder liefert keinen Wert, läuft der normale Start weiter.
+MAINT_API=${MAINT_API:-http://127.0.0.1:9126/api/effective}
+maint_json=$(http_get "$MAINT_API")
+# Kein `// empty`: jq's Alternative-Operator behandelt auch `false` als leer.
+if [[ "$(jq -r '.backends[0].firmware_compatible' <<<"$maint_json" 2>/dev/null)" == "false" ]]; then
+  maint_tag=$(jq -r '.backends[0].app_tag // "?"' <<<"$maint_json" 2>/dev/null)
+  maint_hint=$(jq -r '.backends[0].firmware_hint // ""' <<<"$maint_json" 2>/dev/null)
+  echo "═════════════════════════════════════════════════════════════" >&2
+  echo "  MAINTENANCE MODE — coprocessor firmware '$maint_tag' is not supported" >&2
+  [[ -n "$maint_hint" ]] && echo "  $maint_hint" >&2
+  echo "  Only bmcond is running (WebUI/API :9126).  multimacd, rfd and" >&2
+  echo "  HMIPServer are NOT started.  After a successful firmware flash the" >&2
+  echo "  add-on restarts automatically." >&2
+  echo "═════════════════════════════════════════════════════════════" >&2
+  while :; do
+    if [[ -f /var/run/bmcd-flash-ok ]]; then
+      rm -f /var/run/bmcd-flash-ok
+      restart_init "maintenance mode: firmware flash succeeded"
+    fi
+    if [[ -f /var/run/bmcd-reload-requested ]]; then
+      rm -f /var/run/bmcd-reload-requested
+      restart_init "maintenance mode: /api/reload requested"
+    fi
+    if ! kill -0 "$BMCOND_PID" 2>/dev/null; then
+      wait "$BMCOND_PID" 2>/dev/null; maint_rc=$?
+      echo "── maintenance mode: bmcond exited rc=$maint_rc ──" >&2
+      shutdown_handler
+    fi
+    sleep 2
+  done
 fi
 
 # ── 1b. multimacd ──
@@ -387,14 +481,21 @@ grep -E "Coprocessor Device|Log Destination" /var/run/multimacd.conf
 # multimacd kein -d → foreground.  rt-scheduling-Setup vorher.
 sysctl -w kernel.sched_rt_runtime_us=-1 >/dev/null 2>&1 || \
   echo "  WARN: sched_rt_runtime_us setup failed — multimacd's rt-prio kann hängen"
+# multimacd schreibt seine PID nach /var/status/multimacd.status, sobald der
+# Coprocessor-Init komplett durch ist (Identify → Version → SGTIN → RF-Adresse
+# → Seriennummer).  Eine Datei aus einem früheren Lauf darf das Gate unten
+# nicht vorzeitig öffnen.
+rm -f /var/status/multimacd.status
 /bin/multimacd -f /var/run/multimacd.conf -l "$RFD_LOGLEVEL" -c \
   > >(stdbuf -oL sed 's/^/[mmd    ] /') 2>&1 &
 track "multimacd"
+MMD_PID=$!
 
-# Warten bis /sys/devices/virtual/eq3loop/mmd_*/dev erscheint (multimacd
-# registriert die Slave-Devices nach erstem erfolgreichem Coprocessor-
-# Identify, ca. 3-5s).  In Containern ohne udev werden die /dev/-Nodes
-# NICHT automatisch erzeugt — wir mknod-fallback'n nach Spec von eq-3's
+# Warten bis /sys/devices/virtual/eq3loop/mmd_*/dev erscheint.  multimacd
+# legt die Slave-Kanäle beim Start an, noch VOR jedem Coprocessor-Verkehr —
+# ihre Existenz sagt nichts über den Copro-Zustand (dafür das Status-Gate
+# weiter unten).  In Containern ohne udev werden die /dev/-Nodes NICHT
+# automatisch erzeugt — wir mknod-fallback'n nach Spec von eq-3's
 # start_multimacd.sh.
 echo "── Waiting for eq3loop slave-devices ──"
 for dev in mmd_bidcos mmd_hmip; do
@@ -435,10 +536,8 @@ EOF
   echo "  wrote minimal /etc/config/rfd.conf"
 fi
 
-# bmcond's PTY-Symlink existiert; multimacd hat /dev/mmd_* erzeugt — Stack
-# ist bereit für rfd+HMIPServer.  Multimacd erledigt die HW-Identifikation
-# selbst (Boot-Probe + CHANGE_APP); /dev/mmd_bidcos existiert nur wenn das
-# durchgegangen ist.
+# bmcond's PTY-Symlink existiert; multimacd hat /dev/mmd_* erzeugt.  Ob der
+# Coprocessor-Init durchgelaufen ist, prüft erst das Readiness-Gate vor rfd.
 
 # ── 2. rfd (mit Identify-Race-Retry) ──
 # debmatic-apt installiert nach /bin/rfd mit libs unter /usr/share/debmatic/lib.
@@ -473,31 +572,76 @@ rfd_supervised() {
     sleep "${RFD_RETRY_DELAY:-1}"
   done
 }
-# Boot-Hygiene-Gate (Ground-Truth: OpenCCU/RaspberryMatic S60multimacd
-# waitStartupComplete): rfd erst starten, wenn multimacds eq3loop-Slave-Channel
-# WIRKLICH bedient wird — nicht schon wenn der /dev-Node existiert.
-# /dev/mmd_bidcos taucht auf, SOBALD multimacd den eq3loop-Master öffnet (reine
-# Node-Existenz), aber rfds improvedInit-Identify liefert "" bis multimacd den
-# Slave tatsächlich bedient (unter qemu-usb-host-Passthrough eine jitternde
-# Verzögerung danach; nativ quasi sofort).  OpenCCU pollt darum eine echte
-# Read-Probe `head -c0` auf die mmd-Slaves bis sie aufgeht, BEVOR es rfd (S61)
-# startet — deterministisch + ohne Tax auf nativ, statt eines geratenen sleeps
-# (der traf unter Jitter in ~2/10 Boots zu knapp).  Read-Probe `timeout`-gewrappt
-# falls open() je blockt.  Bounded auf ${RFD_GATE_MAX:-15}s; danach rfd trotzdem
-# starten — der rfd_supervised-Retry-Loop ist der Backstop.
-gate_deadline=$(( $(date +%s) + ${RFD_GATE_MAX:-15} ))
-gate_hit=0
-while [[ $(date +%s) -lt $gate_deadline ]]; do
-  if timeout 1 head -c0 /dev/mmd_bidcos >/dev/null 2>&1 \
-     && { ! $HAS_HMIP || timeout 1 head -c0 /dev/mmd_hmip >/dev/null 2>&1; }; then
-    gate_hit=1; break
+# Readiness-Gate vor rfd, drei Stufen:
+#
+# 1. Status-Datei (Ground-Truth OpenCCU S60multimacd waitStartupComplete):
+#    /var/status/multimacd.status == PID von multimacd.  multimacd schreibt sie
+#    erst nach komplettem Coprocessor-Init.  Kommt sie nicht, hängt multimacd
+#    im Init — es hat danach weder Retry noch Exit, `wait -n` sähe also nie
+#    etwas.  → Stack neu starten (bmcond -B setzt den Copro wieder in den BL).
+#
+# 2. BidCoS-Antwortprobe: die Status-Datei entsteht auch, wenn multimacd die
+#    Copro-Version NICHT lesen konnte ("GetVersion finally failed").  Dann
+#    beantwortet es rfds VersionRequest/GetSerialNumber nie, und rfd scheitert
+#    mit "readSerialNumber failed".  Darum dieselbe Anfrage vorab stellen:
+#    Legacy-System-Frame VersionRequest (dst 0x00, cnt 0, cmd 0x02); multimacd
+#    antwortet lokal mit Status 0x02 (OkWithData) — nur mit bekannter Version.
+#    Das Öffnen/Schließen des Slaves hat dieselben Nebenwirkungen wie
+#    `head -c0` (Connect/Disconnect im multimacd-Subsystem) und passiert, bevor
+#    rfd den Slave exklusiv öffnet.
+#
+# 3. HmIP-Slave öffenbar (head -c0, wie OpenCCU).  Fehler-Text wird geloggt,
+#    damit ein EPERM/EBUSY/ENODEV nicht mehr unsichtbar bleibt.
+MMD_INIT_MAX=${MMD_INIT_MAX:-30}
+mmd_status_ok() { [[ "$(cat /var/status/multimacd.status 2>/dev/null)" == "$MMD_PID" ]]; }
+mmd_bidcos_answers() (
+  # `<>` öffnet mit O_CREAT — ohne diesen Check entstünde bei fehlendem Node
+  # eine reguläre Datei /dev/mmd_bidcos, die den echten Node später blockiert.
+  [[ -c /dev/mmd_bidcos ]] || { echo "/dev/mmd_bidcos ist kein char-device" >&2; exit 2; }
+  exec 7<>/dev/mmd_bidcos || exit 2
+  printf '\xfd\x00\x03\x00\x00\x02\x98\x0f' >&7
+  # multimacd antwortet lokal (ms); die Schleife unten wiederholt bei Bedarf.
+  hex=$(timeout 0.5 cat <&7 | od -An -tx1 -v | tr -d ' \n')
+  [[ "$hex" =~ fd00[0-9a-f]{2}00000402 ]]
+)
+
+gate_start=$(date +%s)
+while ! mmd_status_ok; do
+  if ! kill -0 "$MMD_PID" 2>/dev/null; then
+    # z.B. "No Coprocessor detected" oder Firmware ohne DualCoPro_App
+    # (HMIP_TRX_App/Co_CPU_App → "Please install DualCoPro Firmware").
+    wait "$MMD_PID" 2>/dev/null; mmd_rc=$?
+    fatal_shutdown "multimacd (pid $MMD_PID) vor Init-Ende beendet, rc=$mmd_rc — Ursache in den [mmd    ]- und [bmcond ]-Zeilen oben"
   fi
-  sleep 0.25
+  if (( $(date +%s) - gate_start >= MMD_INIT_MAX )); then
+    fatal_shutdown "multimacd-Init nach ${MMD_INIT_MAX}s nicht abgeschlossen (/var/status/multimacd.status fehlt oder trägt nicht pid $MMD_PID) — Coprocessor-Handshake hängt"
+  fi
+  sleep 0.5
 done
-if [[ $gate_hit -eq 1 ]]; then
-  echo "  rfd-gate: mmd-Slaves serviced (head -c0 OK nach $(( $(date +%s) - (gate_deadline - ${RFD_GATE_MAX:-15}) ))s)"
-else
-  echo "  WARN: rfd-gate timeout (${RFD_GATE_MAX:-15}s) — head -c0 auf mmd-Slaves nie OK; starte rfd trotzdem, Retry-Loop fängt's" >&2
+mmd_status_ok && echo "  rfd-gate 1/3: multimacd-Init komplett nach $(( $(date +%s) - gate_start ))s (status == pid $MMD_PID)"
+
+gate_deadline=$(( $(date +%s) + ${RFD_GATE_MAX:-15} ))
+probe_err=""
+while :; do
+  probe_err=$(mmd_bidcos_answers 2>&1) && break
+  if (( $(date +%s) >= gate_deadline )); then
+    fatal_shutdown "multimacd beantwortet keine BidCoS-Versionsanfrage auf /dev/mmd_bidcos (${RFD_GATE_MAX:-15}s)${probe_err:+ — $probe_err} — Copro-Version unbekannt, rfd würde an readSerialNumber scheitern"
+  fi
+  sleep 0.5
+done
+echo "  rfd-gate 2/3: /dev/mmd_bidcos beantwortet VersionRequest"
+
+if $HAS_HMIP; then
+  hmip_err=""
+  while :; do
+    hmip_err=$(timeout 1 head -c0 /dev/mmd_hmip 2>&1 >/dev/null) && break
+    if (( $(date +%s) >= gate_deadline )); then
+      echo "  WARN: /dev/mmd_hmip nicht öffenbar${hmip_err:+: $hmip_err} — HMIPServer wird scheitern" >&2
+      break
+    fi
+    sleep 0.25
+  done
+  [[ -z "$hmip_err" ]] && echo "  rfd-gate 3/3: /dev/mmd_hmip öffenbar"
 fi
 
 # Ground-Truth (OpenCCU S61rfd): nur sinnvoll, wenn rfd.conf überhaupt einen
@@ -648,31 +792,8 @@ RC=$?
 # anderen Child-Exit: klassischer Shutdown (RC ≠ 0 ist hier ok — HA
 # kann's dann als Crash behandeln + watchdog kicken).
 if [[ -f /var/run/bmcd-reload-requested ]]; then
-  echo "── /api/reload self-restart requested ──"
   rm -f /var/run/bmcd-reload-requested
-  # Wenn unter HA-Supervisor mit hassio_api: true → SUPERVISOR_TOKEN ist
-  # gesetzt → sauberer Container-Restart über Supervisor-API (frisches
-  # Network-Namespace, alle Listen-Sockets sauber released).
-  # Sonst (Standalone-Docker oder kein API-Token): in-container re-exec
-  # mit pkill-P-1-Pfad (best-effort).
-  if [[ -n "${SUPERVISOR_TOKEN:-}" ]]; then
-    echo "── Asking Supervisor to restart this add-on ──"
-    curl -m 5 -s -X POST \
-      -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
-      http://supervisor/addons/self/restart > /dev/null || true
-    # Supervisor schickt SIGTERM an Container — wir warten passiv
-    # (max 60s; danach würde Supervisor SIGKILL nachschießen)
-    sleep 60
-    # falls Supervisor's stop nicht durchkam, fallback: aufgeben
-    echo "── Supervisor restart did not arrive within 60s — falling through ──"
-  fi
-  # Fallback / Standalone-Pfad
-  echo "── Fallback: in-container re-exec ──"
-  pkill -TERM -P 1 2>/dev/null || true
-  sleep 2
-  pkill -KILL -P 1 2>/dev/null || true
-  sleep 1
-  exec "$0" "$@"
+  restart_init "/api/reload self-restart requested"
 fi
 
 # DIED (von wait -n -p) = die echte Service-PID; leer nur im Edge-Case.

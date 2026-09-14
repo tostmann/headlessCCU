@@ -138,6 +138,20 @@ the radio buttons are **pre-selected** — just click **"Speichern + Reload"**
 to persist and restart the stack.  The reload triggers a clean
 container restart via the Supervisor API.
 
+### Maintenance mode (unsupported radio firmware)
+
+The eQ-3 stack (multimacd) only runs with **DualCoPro** coprocessor
+firmware.  If the radio module reports `HMIP_TRX_App` (HmIP-only firmware)
+or `Co_CPU_App` (legacy BidCoS-only firmware), the add-on does not start
+multimacd, rfd or HMIPServer.  Instead it stays up in **maintenance mode**:
+only the Web-UI/API on port 9126 runs, the module row is shown in red with
+the reason, and the log prints a `MAINTENANCE MODE` banner.
+
+Flash the matching DualCoPro image from the Web-UI (where offered for the
+module type).  After a successful flash the add-on restarts automatically
+and brings up the full stack with the new firmware.  Modules running
+`Co_CPU_App` cannot be converted from this add-on.
+
 ## Connecting Home Assistant
 
 Install the [`homematicip_local`](https://github.com/SukramJ/homematicip_local)
