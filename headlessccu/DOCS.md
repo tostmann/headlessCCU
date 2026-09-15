@@ -114,6 +114,7 @@ should now appear.
 | `hmip_radio` | `usb=1b1f:c020` | Transport for the HmIP plane.  Empty or `none` = HmIP disabled |
 | `loglevel` | `3` | `rfd` loglevel (0–5) |
 | `log_level_mock` | `INFO` | `rega_session_mock` Python logging level |
+| `tx_serialize` | `true` | Run radio-bound XML-RPC calls (`setValue`, `putParamset`, link operations) of BidCoS and HmIP one after another. Avoids spurious `Generic error (UNREACH)` on HmIP commands issued within ~100 ms of a BidCoS command on the shared radio. Adds up to one command round-trip (~130–160 ms) of latency when both interfaces are used at the same time. |
 
 Transport-string formats:
 - `usb=VID:PID` — libusb-direct (default for HmIP-RFUSB)

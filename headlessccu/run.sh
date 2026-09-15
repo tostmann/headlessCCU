@@ -11,6 +11,9 @@ INIT_ARGS=("$@")   # für restart_init (re-exec mit denselben Argumenten)
 # ── Konfig: HA Add-On (/data/options.json) ODER env-vars (plain docker) ──
 if [[ -f /data/options.json ]]; then
   read_opt() { jq -r --arg k "$1" --arg d "$2" '.[$k] // $d' /data/options.json; }
+  # Für Booleans: `//` greift in jq auch bei false — ein gesetztes false fiele
+  # sonst auf den Default zurück.
+  read_bool() { jq -r --arg k "$1" --arg d "$2" 'if has($k) and .[$k] != null then .[$k] else $d end' /data/options.json; }
   HMID_LEGACY=$(read_opt hmid auto)
   SERIAL=$(read_opt serial BMC0000001)
   FW=$(read_opt firmware 2.8.6)
@@ -22,6 +25,7 @@ if [[ -f /data/options.json ]]; then
   RFD_LOGLEVEL=$(read_opt loglevel 3)
   REGA_MOCK_LOG=$(read_opt log_level_mock INFO)
   SGTIN=$(read_opt sgtin "")
+  TX_SERIALIZE=$(read_bool tx_serialize true)
 else
   HMID_LEGACY=${BUSMATIC_HMID:-auto}
   SERIAL=${BUSMATIC_SERIAL:-BMC0000001}
@@ -33,6 +37,7 @@ else
   RFD_LOGLEVEL=${BUSMATIC_LOGLEVEL:-3}
   REGA_MOCK_LOG=${REGA_MOCK_LOG_LEVEL:-INFO}
   SGTIN=${BUSMATIC_SGTIN:-}
+  TX_SERIALIZE=${BUSMATIC_TX_SERIALIZE:-true}
 fi
 
 # HMID-Resolution:
@@ -854,15 +859,26 @@ sleep 0.5
 # bedient die CCU-Style-ping-pong-Sequenz die aiohomematic für Keepalive
 # braucht — rfd antwortet auf nacktes ping(caller_id) mit fault, was sonst
 # alle ~30s die Entities auf "unavailable" flippt.
+#
+# TX-Serialisierung (tx_serialize / BUSMATIC_TX_SERIALIZE): BidCoS und HmIP
+# teilen sich hier immer ein DualCoPro-Modul.  Kommt ein Befehl 50–100 ms nach
+# einem Befehl der anderen Schnittstelle, meldet der Copro NO_REPLY und
+# HMIPServer 'Generic error (UNREACH)', obwohl der Aktor geschaltet hat
+# (gemessen 2026-09-15, headlessCCU und Stock-OpenCCU).  Beide Shims nehmen
+# dann für funkgebundene Aufrufe einen gemeinsamen flock.
+SHIM_TX_ARGS=()
+if [[ "$TX_SERIALIZE" == "true" ]] && $HAS_HMIP; then
+  SHIM_TX_ARGS=(--tx-lock /var/run/headlessccu-rf-tx.lock)
+fi
 echo "── Starting ping_shim (BidCoS :2001 → rfd :32001) ──"
 /usr/bin/python3 -u /usr/local/bin/ping_shim.py \
-    --listen-port 2001 --upstream-port 32001 --name bidcos-shim \
+    --listen-port 2001 --upstream-port 32001 --name bidcos-shim "${SHIM_TX_ARGS[@]}" \
   > >(stdbuf -oL sed 's/^/[pingshim] /') 2>&1 &
 track "ping_shim-bidcos"
 if $HAS_HMIP; then
   echo "── Starting ping_shim (HmIP :2010 → HMIPServer :32010) ──"
   /usr/bin/python3 -u /usr/local/bin/ping_shim.py \
-      --listen-port 2010 --upstream-port 32010 --name hmip-shim \
+      --listen-port 2010 --upstream-port 32010 --name hmip-shim "${SHIM_TX_ARGS[@]}" \
     > >(stdbuf -oL sed 's/^/[pingshim] /') 2>&1 &
   track "ping_shim-hmip"
 fi

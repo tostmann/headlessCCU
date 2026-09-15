@@ -26,7 +26,7 @@
 
 services:
   headlessccu:
-    image: headlessccu:2026.9.3
+    image: headlessccu:2026.9.4
     build:
       # Build-Kontext = dieses Verzeichnis (HA-Supervisor-Konvention).
       # bmcond-Source wird vom Dockerfile selbst via git clone gezogen —
@@ -114,6 +114,8 @@ services:
       BUSMATIC_HMIP_TRANSPORT: "usb=1b1f:c020"
       BUSMATIC_LOGLEVEL: "3"
       REGA_MOCK_LOG_LEVEL: "INFO"
+      # false → BidCoS- und HmIP-Befehle nicht mehr nacheinander ausführen (siehe DOCS.md, tx_serialize)
+      BUSMATIC_TX_SERIALIZE: "${BUSMATIC_TX_SERIALIZE:-true}"
       # multimacd_shim=true → eq-3-multimacd übernimmt den vollen Mac-Layer
       # (DUTY/CSMA/AES/3burst-Retry).  Voraussetzung: cap_add MKNOD +
       # device /dev/eq3loop (siehe Kommentare oben).

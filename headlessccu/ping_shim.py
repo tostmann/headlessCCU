@@ -24,16 +24,31 @@ Run two instances: one for BidCoS (upstream rfd:32001) on :2001, one for
 HmIP (upstream HMIPServer:32010) on :2010.  Lighttpd's previous :2001
 and :2010 proxy entries are removed; the shim takes those ports directly.
 
+Optional TX serialization (--tx-lock PATH): when BidCoS and HmIP share one
+DualCoPro radio, a command on one interface issued 50–100 ms after a command
+on the other makes the copro lose the HmIP reply twice and report NO_REPLY,
+which HMIPServer turns into 'Generic error (UNREACH)' although the actuator
+switched (measured on headlessCCU and stock OpenCCU with HmIP-RFUSB 4.4.18).
+With a shared lock file both shim instances run radio-bound calls one at a
+time, holding the lock until the upstream call returns plus --tx-guard-ms.
+This only covers API-triggered traffic, not frames the devices send on
+their own.
+
 Usage:
   ping_shim.py --listen-port 2001 --upstream-port 32001 --name bidcos
   ping_shim.py --listen-port 2010 --upstream-port 32010 --name hmip
+  ping_shim.py ... --tx-lock /var/run/headlessccu-rf-tx.lock
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import logging
+import os
 import sys
 import threading
+import time
 import urllib.request
 import xmlrpc.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +59,64 @@ LOG = logging.getLogger("ping_shim")
 # (interface_id → callback url) — populated by init() interceptor.
 # Thread-safe writes via the GIL since we only do single dict assignments.
 INIT_URLS: dict[str, str] = {}
+
+# XML-RPC methods that put frames on air.  getValue is left out on purpose:
+# it is radio-bound only for some BidCoS parameters, and serializing it would
+# slow down aiohomematic's initial load.
+DEFAULT_TX_METHODS = (
+    "setValue", "putParamset", "addLink", "removeLink",
+    "activateLinkParamset", "deleteDevice", "restoreConfigToDevice",
+)
+
+
+class TxLock:
+    """Cross-process lock shared by the BidCoS and HmIP shim instances.
+
+    flock() on separate open() calls conflicts between processes and between
+    threads of one process, so every request opens its own descriptor.
+    """
+
+    def __init__(self, path: str, guard_ms: int, max_wait_s: float, methods):
+        self.path = path
+        self.guard_s = guard_ms / 1000.0
+        self.max_wait_s = max_wait_s
+        self.methods = frozenset(methods)
+
+    def wants(self, method: str, args: list) -> bool:
+        if method in self.methods:
+            return True
+        if method == "system.multicall" and args and isinstance(args[0], list):
+            return any(isinstance(c, dict) and c.get("methodName") in self.methods
+                       for c in args[0])
+        return False
+
+    @contextlib.contextmanager
+    def hold(self, label: str):
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        t0 = time.monotonic()
+        locked = False
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() - t0 >= self.max_wait_s:
+                        LOG.warning("tx-lock: %s waited %.0f ms — proceeding unserialized",
+                                    label, (time.monotonic() - t0) * 1000)
+                        break
+                    time.sleep(0.005)
+            waited_ms = (time.monotonic() - t0) * 1000
+            if locked and waited_ms >= 20:
+                LOG.info("tx-lock: %s waited %.0f ms", label, waited_ms)
+            yield
+            if locked and self.guard_s:
+                time.sleep(self.guard_s)
+        finally:
+            if locked:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
 
 def _parse_method_call(body: bytes) -> tuple[str, list]:
@@ -111,6 +184,7 @@ def _notify_mock_post_pair(upstream: str, secs: int) -> None:
 class Handler(BaseHTTPRequestHandler):
     upstream_host: str = "127.0.0.1"
     upstream_port: int = 32001
+    tx_lock: TxLock | None = None
 
     def log_message(self, fmt, *args):  # noqa: A003
         LOG.debug("%s %s", self.address_string(), fmt % args)
@@ -216,6 +290,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, success)
             return
 
+        # Radio-bound calls: one at a time across both shim instances
+        if self.tx_lock is not None and self.tx_lock.wants(method, args):
+            label = f"{method}({args[0] if args and isinstance(args[0], str) else ''})"
+            with self.tx_lock.hold(label):
+                status, response = self._forward(body)
+            self._send(status, response)
+            return
+
         # Everything else: blind forward
         status, response = self._forward(body)
         self._send(status, response)
@@ -227,6 +309,14 @@ def main() -> None:
     ap.add_argument("--upstream-port", type=int, required=True)
     ap.add_argument("--upstream-host", default="127.0.0.1")
     ap.add_argument("--name", default="ping-shim")
+    ap.add_argument("--tx-lock", default="",
+                    help="shared lock file for TX serialization across shim instances ('' = off)")
+    ap.add_argument("--tx-guard-ms", type=int, default=20,
+                    help="keep the lock this long after the upstream call returned")
+    ap.add_argument("--tx-lock-max-wait", type=float, default=3.0,
+                    help="seconds to wait for the lock before forwarding unserialized")
+    ap.add_argument("--tx-methods", default=",".join(DEFAULT_TX_METHODS),
+                    help="comma-separated XML-RPC methods that take the lock")
     args = ap.parse_args()
 
     logging.basicConfig(
@@ -237,6 +327,11 @@ def main() -> None:
 
     Handler.upstream_host = args.upstream_host
     Handler.upstream_port = args.upstream_port
+    if args.tx_lock:
+        Handler.tx_lock = TxLock(args.tx_lock, args.tx_guard_ms, args.tx_lock_max_wait,
+                                 [m.strip() for m in args.tx_methods.split(",") if m.strip()])
+        LOG.info("tx-lock: %s guard=%d ms max-wait=%.1f s methods=%s", args.tx_lock,
+                 args.tx_guard_ms, args.tx_lock_max_wait, ",".join(sorted(Handler.tx_lock.methods)))
 
     server = ThreadingHTTPServer(("0.0.0.0", args.listen_port), Handler)
     server.allow_reuse_address = True

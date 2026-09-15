@@ -19,7 +19,7 @@
 #   via `usb: true` (Supervisor mountet /dev/bus/usb dynamisch).
 
 name: headlessCCU (bmcond + multimacd + rfd + HMIPServer + JSON-RPC mock)
-version: 2026.9.3
+version: 2026.9.4
 slug: headlessccu
 description: HomeMatic CCU ohne WebUI/ReGaHss — direkt für Home Assistant oder als Standalone-Docker.
 url: https://github.com/tostmann/headlessCCU
@@ -116,6 +116,10 @@ options:
   hmip_radio: "usb=1b1f:c020"
   loglevel: 3
   log_level_mock: "INFO"
+  # tx_serialize: funkgebundene XML-RPC-Aufrufe (setValue, putParamset, Links)
+  # beider Schnittstellen nacheinander ausführen — vermeidet den NO_REPLY/
+  # UNREACH-Fehler bei fast gleichzeitigen BidCoS- und HmIP-Befehlen.
+  tx_serialize: true
 schema:
   # "auto" oder genau 6-hex.  Default-Option ist auto.
   hmid: "match(^(auto|[0-9a-fA-F]{6})$)"
@@ -125,6 +129,7 @@ schema:
   hmip_radio: "str?"
   loglevel: "int(0,5)"
   log_level_mock: "list(DEBUG|INFO|WARNING|ERROR)"
+  tx_serialize: "bool?"
 
 # Ressourcenrahmen — Java-HMServer + rfd + bmcond + lighttpd + Python-Mock.
 # 256M RAM ist knapp aber reicht im Live-Test auf einem Pi5.
